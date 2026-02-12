@@ -112,14 +112,40 @@
 	}
 
 	function onKeydown(e: KeyboardEvent) {
+		// insert tab
+		if (e.key === 'Tab') {
+			e.preventDefault();
+
+			const TAB = '\t';
+
+			const start = textarea.selectionStart;
+			const end = textarea.selectionEnd;
+
+			const before = text.slice(0, start);
+			const after = text.slice(end);
+
+			// if there's a selection, replace it with a tab
+			text = before + TAB + after;
+
+			requestAnimationFrame(() => {
+				const pos = start + TAB.length;
+				textarea.selectionStart = pos;
+				textarea.selectionEnd = pos;
+				persistText();
+			});
+			return;
+		}
+
 		// undo redo
 		if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {
 			e.preventDefault();
 			undo();
+			return;
 		}
 		if ((e.ctrlKey || e.metaKey) && ((e.shiftKey && e.key === 'Z') || e.key === 'y')) {
 			e.preventDefault();
 			redo();
+			return;
 		}
 	}
 
@@ -214,6 +240,8 @@
 
 		/* Don't allow scrolling */
 		overflow: hidden;
+
+		tab-size: 4;
 	}
 
 	textarea::selection {
