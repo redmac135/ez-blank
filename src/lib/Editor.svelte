@@ -10,8 +10,8 @@
 		selectionEnd: number;
 	}
 
-	const SESSION_KEY = 'ez-blank-session-v1';
-	let saveTimeout: number | null = null;
+	const STORAGE_KEY = 'ez-blank-session-v1';
+	let saveTimeout: number;
 
 	let undoStack: EditorState[] = [];
 	let redoStack: EditorState[] = [];
@@ -26,13 +26,14 @@
 	function pushState() {
 		if (isUndoing) return; // don't push state while undoing
 
-		console.table({ undoStack, redoStack });
-
-		undoStack.push({
+		const state: EditorState = {
 			text,
 			selectionStart: textarea.selectionStart,
 			selectionEnd: textarea.selectionEnd
-		});
+		};
+
+		undoStack.push(state);
+		persistState(state);
 
 		// limit undo stack size
 		if (undoStack.length > 100) undoStack.shift();
@@ -57,12 +58,12 @@
 			textarea.selectionStart = state.selectionStart;
 			textarea.selectionEnd = state.selectionEnd;
 			textarea.focus();
+			persistState(state);
 			isUndoing = false;
 		});
 	}
 
 	function redo() {
-		console.log('redo', { undoStack, redoStack });
 		if (redoStack.length === 0) return;
 
 		isUndoing = true;
@@ -78,6 +79,7 @@
 			textarea.selectionStart = state.selectionStart;
 			textarea.selectionEnd = state.selectionEnd;
 			textarea.focus();
+			persistState(state);
 			isUndoing = false;
 		});
 	}
@@ -121,24 +123,49 @@
 		}
 	}
 
+	function persistState(state: EditorState) {
+		localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+	}
+
 	function persistText() {
-		if (saveTimeout) clearTimeout(saveTimeout);
+		const state: EditorState = {
+			text,
+			selectionStart: textarea.selectionStart,
+			selectionEnd: textarea.selectionEnd
+		};
+
+		clearTimeout(saveTimeout);
 		saveTimeout = window.setTimeout(() => {
-			const state: EditorState = {
-				text,
-				selectionStart: textarea.selectionStart,
-				selectionEnd: textarea.selectionEnd
-			};
-			sessionStorage.setItem(SESSION_KEY, JSON.stringify(state));
-		}, 500);
+			persistState(state);
+		}, 300);
 	}
 
 	function onInput() {
 		persistText();
 	}
 
+	function handleBeforeUnload() {
+		const state: EditorState = {
+			text,
+			selectionStart: textarea.selectionStart,
+			selectionEnd: textarea.selectionEnd
+		};
+		persistState(state);
+	}
+
+	function handleStorage(e: StorageEvent) {
+		if (e.key === STORAGE_KEY && e.newValue) {
+			const state: EditorState = JSON.parse(e.newValue);
+			text = state.text;
+			requestAnimationFrame(() => {
+				textarea.selectionStart = state.selectionStart;
+				textarea.selectionEnd = state.selectionEnd;
+			});
+		}
+	}
+
 	onMount(() => {
-		const saved = sessionStorage.getItem(SESSION_KEY);
+		const saved = localStorage.getItem(STORAGE_KEY);
 		if (saved) {
 			const state: EditorState = JSON.parse(saved);
 			text = state.text;
@@ -153,6 +180,8 @@
 		}
 	});
 </script>
+
+<svelte:window on:beforeunload={handleBeforeUnload} on:storage={handleStorage} />
 
 <textarea
 	bind:this={textarea}
