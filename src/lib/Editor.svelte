@@ -1,36 +1,18 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { parseText, parseLine, renderLine } from './editor/parser';
+	import { EditorHistory, type EditorState } from './editor/history';
+	import { EditorStorage } from './editor/storage';
 
 	let text: string = '';
 	let textarea: HTMLTextAreaElement;
 	let renderedHtml: string = '';
 
+	let editorHistory: EditorHistory;
+
 	$: renderedHtml = parseText(text).map(renderLine).join('\n');
 
-	interface EditorState {
-		text: string;
-		selectionStart: number;
-		selectionEnd: number;
-	}
-
-	interface Token {
-		text: string;
-		bold: boolean;
-		italic: boolean;
-	}
-
-	interface Line {
-		tokens: Token[];
-		listLevel: number; // 0 for not a list, 1 for first level, 2 for nested list, etc.
-		headingLevel: number; // 0 for not a heading, 1 for h1, 2 for h2, etc.
-	}
-
-	const STORAGE_KEY = 'ez-blank-session-v1';
 	let saveTimeout: number;
-
-	let undoStack: EditorState[] = [];
-	let redoStack: EditorState[] = [];
-	let isUndoing = false;
 
 	type EditType = 'typing' | 'deleting' | 'command';
 
@@ -38,189 +20,6 @@
 	let lastEditTime = 0;
 	const TYPING_WINDOW = 750;
 
-	function parseLine(raw: string): Line {
-		let headingLevel = 0;
-		let listLevel = 0;
-		let toBeParsed = raw;
-		const tokens = [];
-
-		// check for lists
-		const listMatch = raw.match(/^(\t*)- /);
-		if (listMatch) {
-			const tabs = listMatch[1].length;
-			listLevel = tabs + 1;
-			tokens.push({
-				text: listMatch[0], // include the space after the dash
-				bold: false,
-				italic: false
-			});
-
-			toBeParsed = raw.slice(listMatch[0].length);
-		}
-
-		// check of headings
-		const headingMatch = raw.match(/^(#{1,6})\s+/);
-		if (headingMatch) {
-			headingLevel = headingMatch[1].length;
-			tokens.push({
-				text: headingMatch[0], // include the space after the hashes
-				bold: true,
-				italic: false
-			});
-
-			toBeParsed = raw.slice(headingMatch[0].length);
-		}
-
-		tokens.push(...parseInline(toBeParsed, headingLevel > 0)); // force bold for headings
-
-		return { tokens, listLevel, headingLevel };
-	}
-
-	function parseInline(raw: string, forceBold = false): Token[] {
-		const tokens: Token[] = [];
-		let i = 0;
-
-		while (i < raw.length) {
-			// Try *** (bold + italic)
-			if (raw.startsWith('***', i)) {
-				const close = raw.indexOf('***', i + 3);
-
-				if (close !== -1 && raw[i + 3] !== ' ' && raw[close - 1] !== ' ') {
-					const full = raw.slice(i, close + 3);
-					tokens.push({ text: full, bold: true, italic: true });
-					i = close + 3;
-					continue;
-				}
-			}
-
-			// Try ** (bold)
-			if (raw.startsWith('**', i)) {
-				const close = raw.indexOf('**', i + 2);
-
-				if (close !== -1 && raw[i + 2] !== ' ' && raw[close - 1] !== ' ') {
-					const full = raw.slice(i, close + 2);
-					tokens.push({ text: full, bold: true, italic: false });
-					i = close + 2;
-					continue;
-				}
-			}
-
-			// Try * (italic)
-			if (raw[i] === '*') {
-				const close = raw.indexOf('*', i + 1);
-
-				if (close !== -1 && raw[i + 1] !== ' ' && raw[close - 1] !== ' ') {
-					const full = raw.slice(i, close + 1);
-					tokens.push({ text: full, bold: false, italic: true });
-					i = close + 1;
-					continue;
-				}
-
-				// If invalid italic → treat single * as normal char
-				tokens.push({
-					text: '*',
-					bold: forceBold,
-					italic: false
-				});
-				i += 1;
-				continue;
-			}
-
-			// Normal text chunk
-			let nextStar = raw.indexOf('*', i);
-			if (nextStar === -1) nextStar = raw.length;
-
-			const normal = raw.slice(i, nextStar);
-
-			tokens.push({
-				text: normal,
-				bold: forceBold,
-				italic: false
-			});
-
-			i = nextStar;
-		}
-
-		return tokens;
-	}
-
-	function renderLine(line: Line): string {
-		let html = line.tokens
-			.map((token) => {
-				let t = token.text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-				if (token.bold) t = `<strong>${t}</strong>`;
-				if (token.italic) t = `<em>${t}</em>`;
-				return t;
-			})
-			.join('');
-
-		return html;
-	}
-
-	function parseText(raw: string): Line[] {
-		return raw.split('\n').map(parseLine);
-	}
-
-	function pushState() {
-		if (isUndoing) return; // don't push state while undoing
-
-		const state: EditorState = {
-			text,
-			selectionStart: textarea.selectionStart,
-			selectionEnd: textarea.selectionEnd
-		};
-
-		undoStack.push(state);
-		persistState(state);
-
-		// limit undo stack size
-		if (undoStack.length > 100) undoStack.shift();
-
-		// clear redo stack on new input
-		redoStack = [];
-	}
-
-	function undo() {
-		if (undoStack.length === 0) return;
-
-		isUndoing = true;
-		const state = undoStack.pop()!;
-		redoStack.push({
-			text,
-			selectionStart: textarea.selectionStart,
-			selectionEnd: textarea.selectionEnd
-		});
-
-		text = state.text;
-		requestAnimationFrame(() => {
-			textarea.selectionStart = state.selectionStart;
-			textarea.selectionEnd = state.selectionEnd;
-			textarea.focus();
-			persistState(state);
-			isUndoing = false;
-		});
-	}
-
-	function redo() {
-		if (redoStack.length === 0) return;
-
-		isUndoing = true;
-		const state = redoStack.pop()!;
-		undoStack.push({
-			text,
-			selectionStart: textarea.selectionStart,
-			selectionEnd: textarea.selectionEnd
-		});
-
-		text = state.text;
-		requestAnimationFrame(() => {
-			textarea.selectionStart = state.selectionStart;
-			textarea.selectionEnd = state.selectionEnd;
-			textarea.focus();
-			persistState(state);
-			isUndoing = false;
-		});
-	}
 	function getCurrentLineBounds(pos: number) {
 		const before = text.slice(0, pos);
 		const lineStart = before.lastIndexOf('\n') + 1;
@@ -238,8 +37,6 @@
 	}
 
 	function onBeforeInput(e: Event) {
-		if (isUndoing) return;
-
 		const ie = e as InputEvent;
 		const now = Date.now();
 
@@ -257,7 +54,12 @@
 			(isDeleting && textarea.selectionStart !== textarea.selectionEnd); // always push before deleting a selection
 
 		if (shouldPush) {
-			pushState();
+			const state: EditorState = {
+				text,
+				selectionStart: textarea.selectionStart,
+				selectionEnd: textarea.selectionEnd
+			};
+			editorHistory.push(state);
 		}
 
 		lastEditType = currentEditType;
@@ -393,18 +195,14 @@
 		// =========================
 		if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {
 			e.preventDefault();
-			undo();
+			editorHistory.undo();
 			return;
 		}
 		if ((e.ctrlKey || e.metaKey) && ((e.shiftKey && e.key === 'Z') || e.key === 'y')) {
 			e.preventDefault();
-			redo();
+			editorHistory.redo();
 			return;
 		}
-	}
-
-	function persistState(state: EditorState) {
-		localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 	}
 
 	function persistText() {
@@ -416,7 +214,7 @@
 
 		clearTimeout(saveTimeout);
 		saveTimeout = window.setTimeout(() => {
-			persistState(state);
+			EditorStorage.save(state);
 		}, 300);
 	}
 
@@ -430,33 +228,40 @@
 			selectionStart: textarea.selectionStart,
 			selectionEnd: textarea.selectionEnd
 		};
-		persistState(state);
+		EditorStorage.save(state);
 	}
 
 	function handleStorage(e: StorageEvent) {
-		if (e.key === STORAGE_KEY && e.newValue) {
-			const state: EditorState = JSON.parse(e.newValue);
-			text = state.text;
-			requestAnimationFrame(() => {
-				textarea.selectionStart = state.selectionStart;
-				textarea.selectionEnd = state.selectionEnd;
-			});
+		if (e.key === EditorStorage.STORAGE_KEY && e.newValue) {
+			const state = EditorStorage.load();
+
+			if (!state) return;
+
+			renderState(state);
 		}
 	}
 
-	onMount(() => {
-		const saved = localStorage.getItem(STORAGE_KEY);
-		if (saved) {
-			const state: EditorState = JSON.parse(saved);
-			text = state.text;
-			requestAnimationFrame(() => {
-				textarea.selectionStart = state.selectionStart;
-				textarea.selectionEnd = state.selectionEnd;
+	function renderState(state: EditorState) {
+		text = state.text;
+		requestAnimationFrame(() => {
+			textarea.selectionStart = state.selectionStart;
+			textarea.selectionEnd = state.selectionEnd;
+		});
+	}
 
-				pushState(); // push loaded state to undo stack
-			});
+	onMount(() => {
+		editorHistory = new EditorHistory(textarea, (v) => (text = v));
+		const saved = EditorStorage.load();
+
+		if (saved) {
+			editorHistory.push(saved);
+			renderState(saved);
 		} else {
-			pushState(); // push initial empty state
+			editorHistory.push({
+				text: '',
+				selectionStart: 0,
+				selectionEnd: 0
+			});
 		}
 	});
 </script>
