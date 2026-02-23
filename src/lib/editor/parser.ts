@@ -126,6 +126,15 @@ export function renderLine(line: Line): string {
 		})
 		.join('');
 
+	// wrap with appropriate tags
+	if (line.listLevel > 0) {
+		html = `<li class="line list" style="--indent: ${line.listLevel - 1}">${html}</li>`;
+	} else if (line.headingLevel > 0) {
+		html = `<h${line.headingLevel} class="line heading">${html}</h${line.headingLevel}>`;
+	} else {
+		html = `<p class="line">${html}</p>`;
+	}
+
 	return html;
 }
 

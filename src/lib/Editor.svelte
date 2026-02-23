@@ -7,10 +7,11 @@
 	let text: string = '';
 	let textarea: HTMLTextAreaElement;
 	let renderedHtml: string = '';
+	let renderLayer: HTMLDivElement;
 
 	let editorHistory: EditorHistory;
 
-	$: renderedHtml = parseText(text).map(renderLine).join('\n');
+	$: renderedHtml = parseText(text).map(renderLine).join('');
 
 	let saveTimeout: number;
 
@@ -219,6 +220,7 @@
 	}
 
 	function onInput() {
+		autoResize();
 		persistText();
 	}
 
@@ -249,6 +251,15 @@
 		});
 	}
 
+	function synchronizeScroll() {
+		renderLayer.scrollTop = textarea.scrollTop;
+	}
+
+	function autoResize() {
+		textarea.style.height = 'auto';
+		textarea.style.height = textarea.scrollHeight + 'px';
+	}
+
 	onMount(() => {
 		editorHistory = new EditorHistory(textarea, (v) => (text = v));
 		const saved = EditorStorage.load();
@@ -263,6 +274,10 @@
 				selectionEnd: 0
 			});
 		}
+
+		requestAnimationFrame(() => {
+			autoResize();
+		});
 	});
 </script>
 
@@ -276,9 +291,10 @@
 		on:keydown={onKeydown}
 		on:beforeinput={onBeforeInput}
 		on:input={onInput}
+		on:scroll={synchronizeScroll}
 	></textarea>
 
-	<div class="render-layer">
+	<div class="render-layer" bind:this={renderLayer}>
 		{#if text.length === 0}
 			<div class="fake-placeholder">Start typing...</div>
 		{:else}
@@ -291,19 +307,23 @@
 	.editor {
 		position: relative;
 		width: 100%;
-		min-height: 100vh;
 		font-family: 'Roboto Mono', monospace;
 		font-size: 18px;
 		line-height: 1.7;
+
+		box-sizing: border-box;
 	}
 
 	.render-layer,
 	.input-layer {
 		position: absolute;
-		inset: 0;
+		top: 0;
+		left: 0;
+		width: 100%;
 		tab-size: 4;
-		overflow: hidden;
 		padding: 1.5rem;
+
+		overflow: hidden;
 	}
 
 	.render-layer {
@@ -336,6 +356,27 @@
 		color: #999;
 		pointer-events: none;
 		white-space: pre-wrap;
+	}
+
+	:global(.render-layer h1),
+	:global(.render-layer h2),
+	:global(.render-layer h3),
+	:global(.render-layer h4),
+	:global(.render-layer h5),
+	:global(.render-layer h6) {
+		all: unset;
+	}
+
+	:global(.render-layer ul),
+	:global(.render-layer ol) {
+		all: unset;
+	}
+
+	:global(.render-layer .line) {
+		display: block;
+		min-height: 1.7em;
+		margin: 0;
+		padding: 0;
 	}
 
 	@media (min-width: 768px) {
