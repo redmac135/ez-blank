@@ -154,6 +154,7 @@
 
 	function render() {
 		showPlaceholder = text.length === 0;
+		renumberAllLists();
 		editor.innerHTML = parseText(text).map(renderLine).join('');
 	}
 
@@ -182,6 +183,67 @@
 		const first = getCurrentLineBounds(start).lineStart;
 		const last = getCurrentLineBounds(end).lineEnd;
 		return { blockStart: first, blockEnd: last };
+	}
+
+	// --- List renumbering ────────────────────────────────────────
+
+	function renumberAllLists() {
+		const lines = text.split('\n');
+		let changed = false;
+
+		function processFrom(start: number, level: number): number {
+			let i = start;
+			let num = 0;
+
+			while (i < lines.length) {
+				if (lines[i].trim() === '') break;
+
+				const parsed = parseLine(lines[i]);
+				if (parsed.listLevel === 0) break;
+				if (parsed.listLevel < level) break;
+
+				// Deeper — recurse
+				if (parsed.listLevel > level) {
+					i = processFrom(i, parsed.listLevel);
+					continue;
+				}
+
+				// Same level
+				if (parsed.ordered) {
+					num++;
+					const indent = '    '.repeat(level - 1);
+					const oldPrefix = lines[i].match(/^((?:    )*)\d+\. /);
+					if (oldPrefix) {
+						const newLine = indent + num + '. ' + lines[i].slice(oldPrefix[0].length);
+						if (newLine !== lines[i]) {
+							lines[i] = newLine;
+							changed = true;
+						}
+					}
+				} else {
+					// Unordered at same level resets the ordered counter
+					num = 0;
+				}
+
+				i++;
+			}
+
+			return i;
+		}
+
+		let i = 0;
+		while (i < lines.length) {
+			const parsed = parseLine(lines[i]);
+			if (parsed.listLevel > 0) {
+				i = processFrom(i, parsed.listLevel);
+			} else {
+				i++;
+			}
+		}
+
+		if (changed) {
+			text = lines.join('\n');
+		}
 	}
 
 	// ─── State helpers ───────────────────────────────────────
@@ -276,7 +338,7 @@
 
 	function onInput() {
 		requestAnimationFrame(() => {
-			const { start, end } = getTextOffset();
+			let { start, end } = getTextOffset();
 			text = extractText();
 			showPlaceholder = text.length === 0;
 			render();
@@ -324,18 +386,23 @@
 					text = text.slice(0, lineStart) + lineText.slice(4) + text.slice(lineEnd);
 					renderAndRestore(start - 4);
 				} else if (parsed.listLevel === 1) {
-					text = text.slice(0, lineStart) + lineText.replace(/^- /, '') + text.slice(lineEnd);
+					text =
+						text.slice(0, lineStart) +
+						lineText.replace(/^- /, '').replace(/^\d+\. /, '') +
+						text.slice(lineEnd);
 					renderAndRestore(Math.max(lineStart, start - 2));
 				}
 				return;
 			}
 
+			// TAB inside list → indent the whole line
 			if (parsed.listLevel > 0) {
 				text = text.slice(0, lineStart) + '    ' + text.slice(lineStart);
 				renderAndRestore(start + 4);
 				return;
 			}
 
+			// NOT a list → normal tab (insert spaces at cursor)
 			text = text.slice(0, start) + '    ' + text.slice(end);
 			renderAndRestore(start + 4);
 			return;
@@ -352,15 +419,29 @@
 				editorHistory.push({ text, selectionStart: start, selectionEnd: end });
 
 				const indent = '    '.repeat(parsed.listLevel - 1);
-				const prefix = indent + '- ';
 
-				if (lineText.trim() === '-') {
+				// Empty list item → exit list
+				if (parsed.ordered && lineText.trim().match(/^\d+\.$/)) {
+					text = text.slice(0, lineStart) + text.slice(lineEnd);
+					renderAndRestore(lineStart);
+					return;
+				}
+				if (!parsed.ordered && lineText.trim() === '-') {
 					text = text.slice(0, lineStart) + text.slice(lineEnd);
 					renderAndRestore(lineStart);
 					return;
 				}
 
+				// Build prefix for new line
+				let prefix: string;
+				if (parsed.ordered) {
+					prefix = indent + (parsed.listNumber + 1) + '. ';
+				} else {
+					prefix = indent + '- ';
+				}
+
 				text = text.slice(0, start) + '\n' + prefix + text.slice(end);
+
 				renderAndRestore(start + 1 + prefix.length);
 				return;
 			}

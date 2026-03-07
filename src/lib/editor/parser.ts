@@ -8,14 +8,19 @@ interface Line {
 	tokens: Token[];
 	listLevel: number;
 	headingLevel: number;
+	ordered: boolean;
+	listNumber: number;
 }
 
 export function parseLine(raw: string): Line {
 	let headingLevel = 0;
 	let listLevel = 0;
+	let ordered = false;
+	let listNumber = 0;
 	let toBeParsed = raw;
 	const tokens: Token[] = [];
 
+	// check for unordered lists
 	const listMatch = raw.match(/^((?:    )*)- /);
 	if (listMatch) {
 		const spaces = listMatch[1].length;
@@ -28,6 +33,24 @@ export function parseLine(raw: string): Line {
 		toBeParsed = raw.slice(listMatch[0].length);
 	}
 
+	// check for ordered lists
+	if (listLevel === 0) {
+		const orderedMatch = raw.match(/^((?:    )*)(\d+)\. /);
+		if (orderedMatch) {
+			const spaces = orderedMatch[1].length;
+			listLevel = spaces / 4 + 1;
+			ordered = true;
+			listNumber = parseInt(orderedMatch[2], 10);
+			tokens.push({
+				text: orderedMatch[0],
+				bold: false,
+				italic: false
+			});
+			toBeParsed = raw.slice(orderedMatch[0].length);
+		}
+	}
+
+	// check for headings
 	const headingMatch = raw.match(/^(#{1,6})\s+/);
 	if (headingMatch) {
 		headingLevel = headingMatch[1].length;
@@ -41,7 +64,7 @@ export function parseLine(raw: string): Line {
 
 	tokens.push(...parseInline(toBeParsed, headingLevel > 0));
 
-	return { tokens, listLevel, headingLevel };
+	return { tokens, listLevel, headingLevel, ordered, listNumber };
 }
 
 function parseInline(raw: string, forceBold = false): Token[] {
@@ -89,7 +112,6 @@ function parseInline(raw: string, forceBold = false): Token[] {
 }
 
 export function renderLine(line: Line): string {
-	// Check if the line has no visible text content
 	const textContent = line.tokens.map((t) => t.text).join('');
 	const isEmpty = textContent.length === 0;
 
@@ -102,11 +124,10 @@ export function renderLine(line: Line): string {
 		})
 		.join('');
 
-	// Empty lines need a <br> so contenteditable keeps them interactive
 	if (isEmpty) html = '<br>';
 
 	if (line.listLevel > 0) {
-		html = `<li class="line list" style="--list-level: ${line.listLevel - 1}">${html}</li>`;
+		html = `<li class="line list" style="--indent: ${line.listLevel - 1}">${html}</li>`;
 	} else if (line.headingLevel > 0) {
 		html = `<h${line.headingLevel} class="line heading">${html}</h${line.headingLevel}>`;
 	} else {
