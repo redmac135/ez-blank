@@ -5,29 +5,176 @@
 	import { EditorStorage } from './editor/storage';
 
 	let text: string = '';
-	let textarea: HTMLTextAreaElement;
-	let renderedHtml: string = '';
-	let renderLayer: HTMLDivElement;
-
+	let editor: HTMLDivElement;
 	let editorHistory: EditorHistory;
-
-	$: renderedHtml = parseText(text).map(renderLine).join('');
-
 	let saveTimeout: number;
+	let showPlaceholder = true;
 
 	type EditType = 'typing' | 'deleting' | 'command';
-
 	let lastEditType: EditType | null = null;
 	let lastEditTime = 0;
 	const TYPING_WINDOW = 750;
 
+	// ─── Cursor: count offset ────────────────────────────────
+
+	function countOffset(root: HTMLElement, node: Node, offset: number): number {
+		const lines = Array.from(root.querySelectorAll('.line'));
+		let total = 0;
+
+		for (let i = 0; i < lines.length; i++) {
+			if (i > 0) total += 1;
+
+			if (lines[i].contains(node)) {
+				total += textOffsetWithin(lines[i], node, offset);
+				return total;
+			}
+
+			total += (lines[i].textContent ?? '').length;
+		}
+
+		return total;
+	}
+
+	function textOffsetWithin(root: Node, target: Node, targetOffset: number): number {
+		// If target is a text node inside root, walk text nodes until we find it
+		const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+		let count = 0;
+
+		while (walker.nextNode()) {
+			const tn = walker.currentNode as Text;
+			if (tn === target) return count + targetOffset;
+			count += tn.length;
+		}
+
+		// target is an element node — offset means "before the Nth child"
+		// Walk text nodes that appear before that child position
+		if (root.contains(target)) {
+			const childAnchor = target.childNodes[targetOffset]; // may be undefined (= end)
+			const w2 = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+			let c = 0;
+			while (w2.nextNode()) {
+				const tn = w2.currentNode as Text;
+				if (
+					childAnchor &&
+					tn.compareDocumentPosition(childAnchor) & Node.DOCUMENT_POSITION_FOLLOWING
+				) {
+					// tn is before childAnchor — but we need the opposite check
+				}
+				// Simpler: if childAnchor exists and this text node is or is inside childAnchor or after it, stop
+				if (childAnchor) {
+					const pos = childAnchor.compareDocumentPosition(tn);
+					if (
+						pos & Node.DOCUMENT_POSITION_CONTAINED_BY ||
+						childAnchor === tn ||
+						pos & Node.DOCUMENT_POSITION_FOLLOWING
+					) {
+						break;
+					}
+				}
+				c += tn.length;
+			}
+			return c;
+		}
+
+		return count;
+	}
+
+	function getTextOffset(): { start: number; end: number } {
+		const sel = window.getSelection();
+		if (!sel || sel.rangeCount === 0) return { start: 0, end: 0 };
+		const range = sel.getRangeAt(0);
+		const start = countOffset(editor, range.startContainer, range.startOffset);
+		const end = countOffset(editor, range.endContainer, range.endOffset);
+		return { start, end };
+	}
+
+	// ─── Cursor: restore offset ──────────────────────────────
+
+	function restoreTextOffset(start: number, end: number) {
+		const sel = window.getSelection();
+		if (!sel) return;
+
+		const lines = Array.from(editor.querySelectorAll('.line'));
+		const startPos = resolvePosition(lines, start);
+		const endPos = resolvePosition(lines, end);
+		if (!startPos || !endPos) return;
+
+		const range = document.createRange();
+		range.setStart(startPos.node, startPos.offset);
+		range.setEnd(endPos.node, endPos.offset);
+		sel.removeAllRanges();
+		sel.addRange(range);
+	}
+
+	function resolvePosition(
+		lines: Element[],
+		offset: number
+	): { node: Node; offset: number } | null {
+		let remaining = offset;
+
+		for (let i = 0; i < lines.length; i++) {
+			if (i > 0) remaining -= 1;
+			const lineLen = (lines[i].textContent ?? '').length;
+
+			if (remaining <= lineLen) {
+				return findTextPosition(lines[i], remaining);
+			}
+			remaining -= lineLen;
+		}
+
+		if (lines.length > 0) {
+			const last = lines[lines.length - 1];
+			return findTextPosition(last, (last.textContent ?? '').length);
+		}
+
+		return { node: editor, offset: 0 };
+	}
+
+	function findTextPosition(root: Node, offset: number): { node: Node; offset: number } {
+		const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+		let remaining = offset;
+
+		while (walker.nextNode()) {
+			const tn = walker.currentNode as Text;
+			if (remaining <= tn.length) return { node: tn, offset: remaining };
+			remaining -= tn.length;
+		}
+
+		return { node: root, offset: 0 };
+	}
+
+	// ─── Text extraction ─────────────────────────────────────
+
+	function extractText(): string {
+		const lines = Array.from(editor.querySelectorAll('.line'));
+		return lines.map((el) => el.textContent ?? '').join('\n');
+	}
+
+	// ─── Rendering ───────────────────────────────────────────
+
+	function render() {
+		showPlaceholder = text.length === 0;
+		editor.innerHTML = parseText(text).map(renderLine).join('');
+	}
+
+	function renderAndRestore(cursorPos?: number) {
+		const pos = cursorPos ?? getTextOffset().start;
+		render();
+		requestAnimationFrame(() => restoreTextOffset(pos, pos));
+	}
+
+	function renderAndRestoreSelection(start: number, end: number) {
+		render();
+		requestAnimationFrame(() => restoreTextOffset(start, end));
+	}
+
+	// ─── Line helpers ────────────────────────────────────────
+
 	function getCurrentLineBounds(pos: number) {
 		const before = text.slice(0, pos);
 		const lineStart = before.lastIndexOf('\n') + 1;
-
 		const nextNewline = text.indexOf('\n', pos);
 		const lineEnd = nextNewline === -1 ? text.length : nextNewline;
-
 		return { lineStart, lineEnd };
 	}
 
@@ -37,48 +184,116 @@
 		return { blockStart: first, blockEnd: last };
 	}
 
-	function onBeforeInput(e: Event) {
-		const ie = e as InputEvent;
+	// ─── State helpers ───────────────────────────────────────
+
+	function applyState(state: EditorState) {
+		text = state.text;
+		render();
+		requestAnimationFrame(() => restoreTextOffset(state.selectionStart, state.selectionEnd));
+	}
+
+	// ─── Persistence ─────────────────────────────────────────
+
+	function persistText() {
+		const { start, end } = getTextOffset();
+		clearTimeout(saveTimeout);
+		saveTimeout = window.setTimeout(() => {
+			EditorStorage.save({ text, selectionStart: start, selectionEnd: end });
+		}, 300);
+	}
+
+	function handleBeforeUnload() {
+		const { start, end } = getTextOffset();
+		EditorStorage.save({ text, selectionStart: start, selectionEnd: end });
+	}
+
+	function handleStorage(e: StorageEvent) {
+		if (e.key === EditorStorage.STORAGE_KEY && e.newValue) {
+			const state = EditorStorage.load();
+			if (state) applyState(state);
+		}
+	}
+
+	// ─── Clipboard ───────────────────────────────────────────
+
+	function onCopy(e: ClipboardEvent) {
+		e.preventDefault();
+		const { start, end } = getTextOffset();
+		const slice = text.slice(start, end);
+		e.clipboardData?.setData('text/plain', slice);
+	}
+
+	function onCut(e: ClipboardEvent) {
+		e.preventDefault();
+		const { start, end } = getTextOffset();
+		const slice = text.slice(start, end);
+		e.clipboardData?.setData('text/plain', slice);
+
+		editorHistory.push({ text, selectionStart: start, selectionEnd: end });
+		text = text.slice(0, start) + text.slice(end);
+		renderAndRestore(start);
+		persistText();
+	}
+
+	function onPaste(e: ClipboardEvent) {
+		e.preventDefault();
+		const pasted = e.clipboardData?.getData('text/plain') ?? '';
+		if (!pasted) return;
+
+		const { start, end } = getTextOffset();
+		editorHistory.push({ text, selectionStart: start, selectionEnd: end });
+
+		text = text.slice(0, start) + pasted + text.slice(end);
+		renderAndRestore(start + pasted.length);
+		persistText();
+	}
+
+	// ─── Input events ────────────────────────────────────────
+
+	function onBeforeInput(e: InputEvent) {
 		const now = Date.now();
-
-		const isTyping = ie.inputType === 'insertText' && !ie.data?.includes('\n');
-
+		const isTyping = e.inputType === 'insertText' && !e.data?.includes('\n');
 		const isDeleting =
-			ie.inputType === 'deleteContentBackward' || ie.inputType === 'deleteContentForward';
+			e.inputType === 'deleteContentBackward' || e.inputType === 'deleteContentForward';
+		const currentEditType: EditType = isTyping ? 'typing' : isDeleting ? 'deleting' : 'command';
 
-		let currentEditType: EditType = isTyping ? 'typing' : isDeleting ? 'deleting' : 'command';
+		const { start, end } = getTextOffset();
+		const hasSelection = start !== end;
 
 		const shouldPush =
 			currentEditType === 'command' ||
 			lastEditType !== currentEditType ||
 			now - lastEditTime > TYPING_WINDOW ||
-			(isDeleting && textarea.selectionStart !== textarea.selectionEnd); // always push before deleting a selection
+			(isDeleting && hasSelection);
 
 		if (shouldPush) {
-			const state: EditorState = {
-				text,
-				selectionStart: textarea.selectionStart,
-				selectionEnd: textarea.selectionEnd
-			};
-			editorHistory.push(state);
+			editorHistory.push({ text, selectionStart: start, selectionEnd: end });
 		}
 
 		lastEditType = currentEditType;
 		lastEditTime = now;
 	}
 
+	function onInput() {
+		requestAnimationFrame(() => {
+			const { start, end } = getTextOffset();
+			text = extractText();
+			showPlaceholder = text.length === 0;
+			render();
+			restoreTextOffset(start, end);
+			persistText();
+		});
+	}
+
 	function onKeydown(e: KeyboardEvent) {
-		const start = textarea.selectionStart;
-		const end = textarea.selectionEnd;
+		const { start, end } = getTextOffset();
 		const hasSelection = start !== end;
 
-		// =========================
-		// TAB / SHIFT+TAB
-		// =========================
+		// ═══ TAB / SHIFT+TAB ═══
 		if (e.key === 'Tab' && !(e.ctrlKey || e.metaKey)) {
 			e.preventDefault();
+			editorHistory.push({ text, selectionStart: start, selectionEnd: end });
 
-			// MULTI-LINE SELECTION
 			if (hasSelection) {
 				const { blockStart, blockEnd } = getSelectedBlockBounds(start, end);
 				const block = text.slice(blockStart, blockEnd);
@@ -86,77 +301,47 @@
 
 				const modified = lines.map((line) => {
 					const parsed = parseLine(line);
-
-					// SHIFT+TAB → UNINDENT
 					if (e.shiftKey) {
-						if (line.startsWith('\t')) return line.slice(1);
+						if (line.startsWith('    ')) return line.slice(4);
 						if (parsed.listLevel === 1) return line.replace(/^- /, '');
 						return line;
 					}
-
-					// TAB → INDENT
-					return '\t' + line;
+					return '    ' + line;
 				});
 
 				const newBlock = modified.join('\n');
-
 				text = text.slice(0, blockStart) + newBlock + text.slice(blockEnd);
-
-				requestAnimationFrame(() => {
-					textarea.selectionStart = blockStart;
-					textarea.selectionEnd = blockStart + newBlock.length;
-				});
-
+				renderAndRestoreSelection(blockStart, blockStart + newBlock.length);
 				return;
 			}
 
-			// SINGLE CURSOR
 			const { lineStart, lineEnd } = getCurrentLineBounds(start);
 			const lineText = text.slice(lineStart, lineEnd);
 			const parsed = parseLine(lineText);
 
-			// SHIFT+TAB (single line)
 			if (e.shiftKey) {
-				if (lineText.startsWith('\t')) {
-					text = text.slice(0, lineStart) + lineText.slice(1) + text.slice(lineEnd);
-					requestAnimationFrame(() => {
-						textarea.selectionStart = start - 1;
-						textarea.selectionEnd = start - 1;
-					});
+				if (lineText.startsWith('    ')) {
+					text = text.slice(0, lineStart) + lineText.slice(4) + text.slice(lineEnd);
+					renderAndRestore(start - 4);
 				} else if (parsed.listLevel === 1) {
 					text = text.slice(0, lineStart) + lineText.replace(/^- /, '') + text.slice(lineEnd);
+					renderAndRestore(Math.max(lineStart, start - 2));
 				}
 				return;
 			}
 
-			// TAB inside list → indent
 			if (parsed.listLevel > 0) {
-				text = text.slice(0, lineStart) + '\t' + text.slice(lineStart);
-
-				requestAnimationFrame(() => {
-					textarea.selectionStart = start + 1;
-					textarea.selectionEnd = start + 1;
-				});
+				text = text.slice(0, lineStart) + '    ' + text.slice(lineStart);
+				renderAndRestore(start + 4);
 				return;
 			}
 
-			// NOT A LIST → normal tab
-			const before = text.slice(0, start);
-			const after = text.slice(end);
-
-			text = before + '\t' + after;
-
-			requestAnimationFrame(() => {
-				const pos = start + 1;
-				textarea.selectionStart = pos;
-				textarea.selectionEnd = pos;
-			});
+			text = text.slice(0, start) + '    ' + text.slice(end);
+			renderAndRestore(start + 4);
 			return;
 		}
 
-		// =========================
-		// ENTER (LIST CONTINUATION)
-		// =========================
+		// ═══ ENTER (LIST CONTINUATION) ═══
 		if (e.key === 'Enter') {
 			const { lineStart, lineEnd } = getCurrentLineBounds(start);
 			const lineText = text.slice(lineStart, lineEnd);
@@ -164,36 +349,24 @@
 
 			if (parsed.listLevel > 0) {
 				e.preventDefault();
+				editorHistory.push({ text, selectionStart: start, selectionEnd: end });
 
-				const indent = '\t'.repeat(parsed.listLevel - 1);
+				const indent = '    '.repeat(parsed.listLevel - 1);
 				const prefix = indent + '- ';
 
-				// If empty list item → exit list
 				if (lineText.trim() === '-') {
 					text = text.slice(0, lineStart) + text.slice(lineEnd);
-
-					requestAnimationFrame(() => {
-						textarea.selectionStart = lineStart + indent.length;
-						textarea.selectionEnd = lineStart + indent.length;
-					});
+					renderAndRestore(lineStart);
 					return;
 				}
 
-				text = text.slice(0, start) + '\n' + prefix + text.slice(start);
-
-				requestAnimationFrame(() => {
-					const pos = start + 1 + prefix.length;
-					textarea.selectionStart = pos;
-					textarea.selectionEnd = pos;
-				});
-
+				text = text.slice(0, start) + '\n' + prefix + text.slice(end);
+				renderAndRestore(start + 1 + prefix.length);
 				return;
 			}
 		}
 
-		// =========================
-		// UNDO / REDO
-		// =========================
+		// ═══ UNDO / REDO ═══
 		if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {
 			e.preventDefault();
 			editorHistory.undo();
@@ -206,101 +379,50 @@
 		}
 	}
 
-	function persistText() {
-		const state: EditorState = {
-			text,
-			selectionStart: textarea.selectionStart,
-			selectionEnd: textarea.selectionEnd
-		};
-
-		clearTimeout(saveTimeout);
-		saveTimeout = window.setTimeout(() => {
-			EditorStorage.save(state);
-		}, 300);
-	}
-
-	function onInput() {
-		autoResize();
-		persistText();
-	}
-
-	function handleBeforeUnload() {
-		const state: EditorState = {
-			text,
-			selectionStart: textarea.selectionStart,
-			selectionEnd: textarea.selectionEnd
-		};
-		EditorStorage.save(state);
-	}
-
-	function handleStorage(e: StorageEvent) {
-		if (e.key === EditorStorage.STORAGE_KEY && e.newValue) {
-			const state = EditorStorage.load();
-
-			if (!state) return;
-
-			renderState(state);
-		}
-	}
-
-	function renderState(state: EditorState) {
-		text = state.text;
-		requestAnimationFrame(() => {
-			textarea.selectionStart = state.selectionStart;
-			textarea.selectionEnd = state.selectionEnd;
-		});
-	}
-
-	function synchronizeScroll() {
-		renderLayer.scrollTop = textarea.scrollTop;
-	}
-
-	function autoResize() {
-		textarea.style.height = 'auto';
-		textarea.style.height = textarea.scrollHeight + 'px';
-	}
-
+	// ─── Lifecycle ───────────────────────────────────────────
 	onMount(() => {
-		editorHistory = new EditorHistory(textarea, (v) => (text = v));
+		editorHistory = new EditorHistory(
+			() => {
+				const { start, end } = getTextOffset();
+				return { text, selectionStart: start, selectionEnd: end };
+			},
+			(state: EditorState) => {
+				applyState(state);
+			}
+		);
+
 		const saved = EditorStorage.load();
 
 		if (saved) {
 			editorHistory.push(saved);
-			renderState(saved);
+			applyState(saved);
 		} else {
-			editorHistory.push({
-				text: '',
-				selectionStart: 0,
-				selectionEnd: 0
-			});
+			const empty: EditorState = { text: '', selectionStart: 0, selectionEnd: 0 };
+			editorHistory.push(empty);
+			applyState(empty);
 		}
-
-		requestAnimationFrame(() => {
-			autoResize();
-		});
 	});
 </script>
 
 <svelte:window on:beforeunload={handleBeforeUnload} on:storage={handleStorage} />
 
 <main class="editor">
-	<textarea
-		class="input-layer"
-		bind:this={textarea}
-		bind:value={text}
-		on:keydown={onKeydown}
+	<div
+		class="editable"
+		class:empty={text.length === 0}
+		contenteditable="true"
+		spellcheck="true"
+		bind:this={editor}
 		on:beforeinput={onBeforeInput}
 		on:input={onInput}
-		on:scroll={synchronizeScroll}
-	></textarea>
-
-	<div class="render-layer" bind:this={renderLayer}>
-		{#if text.length === 0}
-			<div class="fake-placeholder">Start typing...</div>
-		{:else}
-			{@html renderedHtml}
-		{/if}
-	</div>
+		on:keydown={onKeydown}
+		on:copy={onCopy}
+		on:cut={onCut}
+		on:paste={onPaste}
+		aria-label="Markdown editor"
+		role="textbox"
+		tabindex="0"
+	></div>
 </main>
 
 <style>
@@ -310,73 +432,57 @@
 		font-family: 'Roboto Mono', monospace;
 		font-size: 18px;
 		line-height: 1.7;
-
 		box-sizing: border-box;
 	}
 
-	.render-layer,
-	.input-layer {
-		position: absolute;
-		top: 0;
-		left: 0;
+	.editable {
 		width: 100%;
-		tab-size: 4;
 		padding: 1.5rem;
-
-		overflow: hidden;
-	}
-
-	.render-layer {
-		pointer-events: none;
+		outline: none;
 		white-space: pre-wrap;
 		word-break: break-word;
+		caret-color: #555;
 	}
 
-	.input-layer {
-		background: transparent;
-		color: transparent; /* hide text */
-		caret-color: #555; /* show caret */
-
-		-webkit-text-fill-color: transparent;
-
-		border: none;
-		outline: none;
-		resize: none;
-
-		font: inherit;
-		line-height: inherit;
-		white-space: pre-wrap;
-	}
-
-	.input-layer::selection {
+	.editable::selection {
 		background: rgba(180, 213, 255, 0.6);
 	}
 
-	.fake-placeholder {
+	.editable.empty::before {
+		content: 'Start typing...';
 		color: #999;
 		pointer-events: none;
-		white-space: pre-wrap;
+		position: absolute;
 	}
 
-	:global(.render-layer h1),
-	:global(.render-layer h2),
-	:global(.render-layer h3),
-	:global(.render-layer h4),
-	:global(.render-layer h5),
-	:global(.render-layer h6) {
-		all: unset;
+	:global(.editable .fake-placeholder) {
+		color: #999;
 	}
 
-	:global(.render-layer ul),
-	:global(.render-layer ol) {
-		all: unset;
-	}
-
-	:global(.render-layer .line) {
+	:global(.editable .line) {
 		display: block;
 		min-height: 1.7em;
 		margin: 0;
 		padding: 0;
+	}
+
+	:global(.editable .line.list) {
+		padding-left: calc(2ch + (var(--list-level)) * 4ch);
+		text-indent: calc(-2ch - (var(--list-level)) * 4ch);
+	}
+
+	:global(.editable h1),
+	:global(.editable h2),
+	:global(.editable h3),
+	:global(.editable h4),
+	:global(.editable h5),
+	:global(.editable h6) {
+		all: unset;
+	}
+
+	:global(.editable ul),
+	:global(.editable ol) {
+		all: unset;
 	}
 
 	@media (min-width: 768px) {
@@ -386,8 +492,7 @@
 			display: block;
 		}
 
-		.render-layer,
-		.input-layer {
+		.editable {
 			padding: 8rem 1.5rem;
 		}
 	}

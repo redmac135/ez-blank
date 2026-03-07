@@ -4,29 +4,18 @@ export interface EditorState {
 	selectionEnd: number;
 }
 
-
 export class EditorHistory {
 	private undoStack: EditorState[] = [];
 	private redoStack: EditorState[] = [];
-	private textArea: HTMLTextAreaElement;
-	private setText: (text: string) => void;
 	private isApplyingHistory = false;
-
 	private MAX_HISTORY = 100;
 
-	constructor(textArea: HTMLTextAreaElement, setText: (text: string) => void) {
-		this.textArea = textArea;
-		this.setText = setText;
-	}
+	private getState: () => EditorState;
+	private applyState: (state: EditorState) => void;
 
-	private setState(state: EditorState) {
-		requestAnimationFrame(() => {
-			this.setText(state.text);
-			this.textArea.selectionStart = state.selectionStart;
-			this.textArea.selectionEnd = state.selectionEnd;
-			this.textArea.focus();
-			this.isApplyingHistory = false;
-		})
+	constructor(getState: () => EditorState, applyState: (state: EditorState) => void) {
+		this.getState = getState;
+		this.applyState = applyState;
 	}
 
 	push(state: EditorState) {
@@ -34,12 +23,10 @@ export class EditorHistory {
 
 		this.undoStack.push(state);
 
-		// limit undo stack size
 		if (this.undoStack.length > this.MAX_HISTORY) {
 			this.undoStack.shift();
 		}
 
-		// clear redo stack on new action
 		this.redoStack = [];
 	}
 
@@ -47,29 +34,29 @@ export class EditorHistory {
 		if (this.undoStack.length === 0) return;
 
 		this.isApplyingHistory = true;
-		const currentState = {
-			text: this.textArea.value,
-			selectionStart: this.textArea.selectionStart,
-			selectionEnd: this.textArea.selectionEnd
-		};
+		const currentState = this.getState();
 		this.redoStack.push(currentState);
 
 		const prevState = this.undoStack.pop()!;
-		this.setState(prevState);
+		this.applyState(prevState);
+
+		requestAnimationFrame(() => {
+			this.isApplyingHistory = false;
+		});
 	}
 
 	redo() {
 		if (this.redoStack.length === 0) return;
 
 		this.isApplyingHistory = true;
-		const currentState = {
-			text: this.textArea.value,
-			selectionStart: this.textArea.selectionStart,
-			selectionEnd: this.textArea.selectionEnd
-		};
+		const currentState = this.getState();
 		this.undoStack.push(currentState);
 
 		const nextState = this.redoStack.pop()!;
-		this.setState(nextState);
+		this.applyState(nextState);
+
+		requestAnimationFrame(() => {
+			this.isApplyingHistory = false;
+		});
 	}
 }
