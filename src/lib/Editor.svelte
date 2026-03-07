@@ -8,7 +8,6 @@
 	let editor: HTMLDivElement;
 	let editorHistory: EditorHistory;
 	let saveTimeout: number;
-	let showPlaceholder = true;
 
 	type EditType = 'typing' | 'deleting' | 'command';
 	let lastEditType: EditType | null = null;
@@ -153,7 +152,6 @@
 	// ─── Rendering ───────────────────────────────────────────
 
 	function render() {
-		showPlaceholder = text.length === 0;
 		renumberAllLists();
 		editor.innerHTML = parseText(text).map(renderLine).join('');
 	}
@@ -340,7 +338,6 @@
 		requestAnimationFrame(() => {
 			let { start, end } = getTextOffset();
 			text = extractText();
-			showPlaceholder = text.length === 0;
 			render();
 			restoreTextOffset(start, end);
 			persistText();
@@ -548,8 +545,8 @@
 	}
 
 	:global(.editable .line.list) {
-		padding-left: calc(2ch + (var(--list-level)) * 4ch);
-		text-indent: calc(-2ch - (var(--list-level)) * 4ch);
+		padding-left: calc(var(--prefix-width) * 1ch + (var(--list-level)) * 4ch);
+		text-indent: calc(-1 * (var(--prefix-width) * 1ch + (var(--list-level)) * 4ch));
 	}
 
 	:global(.editable h1),

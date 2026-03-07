@@ -127,7 +127,8 @@ export function renderLine(line: Line): string {
 	if (isEmpty) html = '<br>';
 
 	if (line.listLevel > 0) {
-		html = `<li class="line list" style="--indent: ${line.listLevel - 1}">${html}</li>`;
+		const prefixWidth = line.ordered ? String(line.listNumber).length + 2 : 2;
+		html = `<li class="line list" style="--list-level: ${line.listLevel - 1}; --prefix-width: ${prefixWidth}">${html}</li>`;
 	} else if (line.headingLevel > 0) {
 		html = `<h${line.headingLevel} class="line heading">${html}</h${line.headingLevel}>`;
 	} else {
