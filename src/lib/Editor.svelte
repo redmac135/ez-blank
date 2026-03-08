@@ -441,6 +441,12 @@
 
 				renderAndRestore(start + 1 + prefix.length);
 				return;
+			} else {
+				// Normal enter → insert newline
+				e.preventDefault();
+				text = text.slice(0, start) + '\n' + text.slice(end);
+				renderAndRestore(start + 1);
+				return;
 			}
 		}
 
