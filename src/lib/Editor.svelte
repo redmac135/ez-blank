@@ -1,10 +1,22 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { parseText, parseLine, renderLine } from './editor/parser';
+	import { buildDocument, type EditorDocument } from './editor/parser';
+	import { syncEditorDom } from './editor/dom';
+	import { extractText, getTextOffset, restoreTextOffset } from './editor/selection';
+	import { cutSelection, pasteText, writeSelectionToClipboard } from './editor/clipboard';
+	import {
+		deleteBackward,
+		deleteForward,
+		getCurrentLineBounds,
+		getListMetadata,
+		getSelectedBlockBounds,
+		replaceRange
+	} from './editor/edits';
 	import { EditorHistory, type EditorState } from './editor/history';
 	import { EditorStorage } from './editor/storage';
 
-	let text: string = '';
+	let text = '';
+	let documentModel: EditorDocument = buildDocument('');
 	let editor: HTMLDivElement;
 	let editorHistory: EditorHistory;
 	let saveTimeout: number;
@@ -13,249 +25,31 @@
 	let lastEditType: EditType | null = null;
 	let lastEditTime = 0;
 	const TYPING_WINDOW = 750;
+	let isApplyingControlledEdit = false;
 
-	// ─── Cursor: count offset ────────────────────────────────
+	function commitText(nextText: string, selectionStart?: number, selectionEnd?: number) {
+		const previousDocument = documentModel;
+		const nextDocument = buildDocument(nextText);
 
-	function countOffset(root: HTMLElement, node: Node, offset: number): number {
-		const lines = Array.from(root.querySelectorAll('.line'));
-		let total = 0;
+		text = nextDocument.text;
+		documentModel = nextDocument;
+		syncEditorDom(editor, previousDocument, nextDocument);
 
-		for (let i = 0; i < lines.length; i++) {
-			if (i > 0) total += 1;
-
-			if (lines[i].contains(node)) {
-				total += textOffsetWithin(lines[i], node, offset);
-				return total;
-			}
-
-			total += (lines[i].textContent ?? '').length;
-		}
-
-		return total;
+		const start = Math.max(0, Math.min(selectionStart ?? 0, nextDocument.text.length));
+		const end = Math.max(0, Math.min(selectionEnd ?? start, nextDocument.text.length));
+		restoreTextOffset(editor, documentModel, start, end);
 	}
-
-	function textOffsetWithin(root: Node, target: Node, targetOffset: number): number {
-		// If target is a text node inside root, walk text nodes until we find it
-		const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-		let count = 0;
-
-		while (walker.nextNode()) {
-			const tn = walker.currentNode as Text;
-			if (tn === target) return count + targetOffset;
-			count += tn.length;
-		}
-
-		// target is an element node — offset means "before the Nth child"
-		// Walk text nodes that appear before that child position
-		if (root.contains(target)) {
-			const childAnchor = target.childNodes[targetOffset]; // may be undefined (= end)
-			const w2 = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-			let c = 0;
-			while (w2.nextNode()) {
-				const tn = w2.currentNode as Text;
-				if (
-					childAnchor &&
-					tn.compareDocumentPosition(childAnchor) & Node.DOCUMENT_POSITION_FOLLOWING
-				) {
-					// tn is before childAnchor — but we need the opposite check
-				}
-				// Simpler: if childAnchor exists and this text node is or is inside childAnchor or after it, stop
-				if (childAnchor) {
-					const pos = childAnchor.compareDocumentPosition(tn);
-					if (
-						pos & Node.DOCUMENT_POSITION_CONTAINED_BY ||
-						childAnchor === tn ||
-						pos & Node.DOCUMENT_POSITION_FOLLOWING
-					) {
-						break;
-					}
-				}
-				c += tn.length;
-			}
-			return c;
-		}
-
-		return count;
-	}
-
-	function getTextOffset(): { start: number; end: number } {
-		const sel = window.getSelection();
-		if (!sel || sel.rangeCount === 0) return { start: 0, end: 0 };
-		const range = sel.getRangeAt(0);
-		const start = countOffset(editor, range.startContainer, range.startOffset);
-		const end = countOffset(editor, range.endContainer, range.endOffset);
-		return { start, end };
-	}
-
-	// ─── Cursor: restore offset ──────────────────────────────
-
-	function restoreTextOffset(start: number, end: number) {
-		const sel = window.getSelection();
-		if (!sel) return;
-
-		const lines = Array.from(editor.querySelectorAll('.line'));
-		const startPos = resolvePosition(lines, start);
-		const endPos = resolvePosition(lines, end);
-		if (!startPos || !endPos) return;
-
-		const range = document.createRange();
-		range.setStart(startPos.node, startPos.offset);
-		range.setEnd(endPos.node, endPos.offset);
-		sel.removeAllRanges();
-		sel.addRange(range);
-	}
-
-	function resolvePosition(
-		lines: Element[],
-		offset: number
-	): { node: Node; offset: number } | null {
-		let remaining = offset;
-
-		for (let i = 0; i < lines.length; i++) {
-			if (i > 0) remaining -= 1;
-			const lineLen = (lines[i].textContent ?? '').length;
-
-			if (remaining <= lineLen) {
-				return findTextPosition(lines[i], remaining);
-			}
-			remaining -= lineLen;
-		}
-
-		if (lines.length > 0) {
-			const last = lines[lines.length - 1];
-			return findTextPosition(last, (last.textContent ?? '').length);
-		}
-
-		return { node: editor, offset: 0 };
-	}
-
-	function findTextPosition(root: Node, offset: number): { node: Node; offset: number } {
-		const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-		let remaining = offset;
-
-		while (walker.nextNode()) {
-			const tn = walker.currentNode as Text;
-			if (remaining <= tn.length) return { node: tn, offset: remaining };
-			remaining -= tn.length;
-		}
-
-		return { node: root, offset: 0 };
-	}
-
-	// ─── Text extraction ─────────────────────────────────────
-
-	function extractText(): string {
-		const lines = Array.from(editor.querySelectorAll('.line'));
-		return lines.map((el) => el.textContent ?? '').join('\n');
-	}
-
-	// ─── Rendering ───────────────────────────────────────────
-
-	function render() {
-		renumberAllLists();
-		editor.innerHTML = parseText(text).map(renderLine).join('');
-	}
-
-	function renderAndRestore(cursorPos?: number) {
-		const pos = cursorPos ?? getTextOffset().start;
-		render();
-		requestAnimationFrame(() => restoreTextOffset(pos, pos));
-	}
-
-	function renderAndRestoreSelection(start: number, end: number) {
-		render();
-		requestAnimationFrame(() => restoreTextOffset(start, end));
-	}
-
-	// ─── Line helpers ────────────────────────────────────────
-
-	function getCurrentLineBounds(pos: number) {
-		const before = text.slice(0, pos);
-		const lineStart = before.lastIndexOf('\n') + 1;
-		const nextNewline = text.indexOf('\n', pos);
-		const lineEnd = nextNewline === -1 ? text.length : nextNewline;
-		return { lineStart, lineEnd };
-	}
-
-	function getSelectedBlockBounds(start: number, end: number) {
-		const first = getCurrentLineBounds(start).lineStart;
-		const last = getCurrentLineBounds(end).lineEnd;
-		return { blockStart: first, blockEnd: last };
-	}
-
-	// --- List renumbering ────────────────────────────────────────
-
-	function renumberAllLists() {
-		const lines = text.split('\n');
-		let changed = false;
-
-		function processFrom(start: number, level: number): number {
-			let i = start;
-			let num = 0;
-
-			while (i < lines.length) {
-				if (lines[i].trim() === '') break;
-
-				const parsed = parseLine(lines[i]);
-				if (parsed.listLevel === 0) break;
-				if (parsed.listLevel < level) break;
-
-				// Deeper — recurse
-				if (parsed.listLevel > level) {
-					i = processFrom(i, parsed.listLevel);
-					continue;
-				}
-
-				// Same level
-				if (parsed.ordered) {
-					num++;
-					const indent = '    '.repeat(level - 1);
-					const oldPrefix = lines[i].match(/^((?:    )*)\d+\. /);
-					if (oldPrefix) {
-						const newLine = indent + num + '. ' + lines[i].slice(oldPrefix[0].length);
-						if (newLine !== lines[i]) {
-							lines[i] = newLine;
-							changed = true;
-						}
-					}
-				} else {
-					// Unordered at same level resets the ordered counter
-					num = 0;
-				}
-
-				i++;
-			}
-
-			return i;
-		}
-
-		let i = 0;
-		while (i < lines.length) {
-			const parsed = parseLine(lines[i]);
-			if (parsed.listLevel > 0) {
-				i = processFrom(i, parsed.listLevel);
-			} else {
-				i++;
-			}
-		}
-
-		if (changed) {
-			text = lines.join('\n');
-		}
-	}
-
-	// ─── State helpers ───────────────────────────────────────
 
 	function applyState(state: EditorState) {
-		text = state.text;
-		render();
-		requestAnimationFrame(() => restoreTextOffset(state.selectionStart, state.selectionEnd));
+		const nextDocument = buildDocument(state.text);
+		text = nextDocument.text;
+		documentModel = nextDocument;
+		syncEditorDom(editor, null, nextDocument);
+		restoreTextOffset(editor, documentModel, state.selectionStart, state.selectionEnd);
 	}
 
-	// ─── Persistence ─────────────────────────────────────────
-
 	function persistText() {
-		const { start, end } = getTextOffset();
+		const { start, end } = getTextOffset(editor, documentModel);
 		clearTimeout(saveTimeout);
 		saveTimeout = window.setTimeout(() => {
 			EditorStorage.save({ text, selectionStart: start, selectionEnd: end });
@@ -263,63 +57,64 @@
 	}
 
 	function handleBeforeUnload() {
-		const { start, end } = getTextOffset();
+		const { start, end } = getTextOffset(editor, documentModel);
 		EditorStorage.save({ text, selectionStart: start, selectionEnd: end });
 	}
 
-	function handleStorage(e: StorageEvent) {
-		if (e.key === EditorStorage.STORAGE_KEY && e.newValue) {
-			const state = EditorStorage.load();
-			if (state) applyState(state);
-		}
+	function handleStorage(event: StorageEvent) {
+		if (event.key !== EditorStorage.STORAGE_KEY || !event.newValue) return;
+		const state = EditorStorage.load();
+		if (state) applyState(state);
 	}
 
-	// ─── Clipboard ───────────────────────────────────────────
-
-	function onCopy(e: ClipboardEvent) {
-		e.preventDefault();
-		const { start, end } = getTextOffset();
-		const slice = text.slice(start, end);
-		e.clipboardData?.setData('text/plain', slice);
+	function onCopy(event: ClipboardEvent) {
+		event.preventDefault();
+		const { start, end } = getTextOffset(editor, documentModel);
+		writeSelectionToClipboard(event.clipboardData, text, documentModel, { start, end });
 	}
 
-	function onCut(e: ClipboardEvent) {
-		e.preventDefault();
-		const { start, end } = getTextOffset();
-		const slice = text.slice(start, end);
-		e.clipboardData?.setData('text/plain', slice);
-
+	function onCut(event: ClipboardEvent) {
+		event.preventDefault();
+		const { start, end } = getTextOffset(editor, documentModel);
+		writeSelectionToClipboard(event.clipboardData, text, documentModel, { start, end });
 		editorHistory.push({ text, selectionStart: start, selectionEnd: end });
-		text = text.slice(0, start) + text.slice(end);
-		renderAndRestore(start);
+		const change = cutSelection(text, { start, end });
+		commitText(change.text, change.selectionStart, change.selectionEnd);
 		persistText();
 	}
 
-	function onPaste(e: ClipboardEvent) {
-		e.preventDefault();
-		const pasted = e.clipboardData?.getData('text/plain') ?? '';
+	function onPaste(event: ClipboardEvent) {
+		event.preventDefault();
+		const pasted = event.clipboardData?.getData('text/plain') ?? '';
 		if (!pasted) return;
 
-		const { start, end } = getTextOffset();
+		const { start, end } = getTextOffset(editor, documentModel);
 		editorHistory.push({ text, selectionStart: start, selectionEnd: end });
-
-		text = text.slice(0, start) + pasted + text.slice(end);
-		renderAndRestore(start + pasted.length);
+		const change = pasteText(text, { start, end }, pasted);
+		commitText(change.text, change.selectionStart, change.selectionEnd);
 		persistText();
 	}
 
-	// ─── Input events ────────────────────────────────────────
+	function applyControlledEdit(
+		nextText: string,
+		selectionStart: number,
+		selectionEnd = selectionStart
+	) {
+		isApplyingControlledEdit = true;
+		commitText(nextText, selectionStart, selectionEnd);
+		isApplyingControlledEdit = false;
+		persistText();
+	}
 
-	function onBeforeInput(e: InputEvent) {
+	function onBeforeInput(event: InputEvent) {
 		const now = Date.now();
-		const isTyping = e.inputType === 'insertText' && !e.data?.includes('\n');
+		const isTyping = event.inputType === 'insertText' && !event.data?.includes('\n');
 		const isDeleting =
-			e.inputType === 'deleteContentBackward' || e.inputType === 'deleteContentForward';
+			event.inputType === 'deleteContentBackward' || event.inputType === 'deleteContentForward';
 		const currentEditType: EditType = isTyping ? 'typing' : isDeleting ? 'deleting' : 'command';
 
-		const { start, end } = getTextOffset();
+		const { start, end } = getTextOffset(editor, documentModel);
 		const hasSelection = start !== end;
-
 		const shouldPush =
 			currentEditType === 'command' ||
 			lastEditType !== currentEditType ||
@@ -332,142 +127,178 @@
 
 		lastEditType = currentEditType;
 		lastEditTime = now;
+
+		if (event.isComposing) return;
+
+		if (event.inputType === 'insertText' && event.data) {
+			event.preventDefault();
+			const change = replaceRange(text, { start, end }, event.data);
+			applyControlledEdit(change.text, change.selectionStart, change.selectionEnd);
+			return;
+		}
+
+		if (event.inputType === 'deleteContentBackward') {
+			event.preventDefault();
+			const change = deleteBackward(text, { start, end });
+			applyControlledEdit(change.text, change.selectionStart, change.selectionEnd);
+			return;
+		}
+
+		if (event.inputType === 'deleteContentForward') {
+			event.preventDefault();
+			const change = deleteForward(text, { start, end });
+			applyControlledEdit(change.text, change.selectionStart, change.selectionEnd);
+			return;
+		}
+
+		if (event.inputType === 'insertParagraph') {
+			event.preventDefault();
+			const change = replaceRange(text, { start, end }, '\n');
+			applyControlledEdit(change.text, change.selectionStart, change.selectionEnd);
+		}
 	}
 
 	function onInput() {
+		if (isApplyingControlledEdit) return;
+
 		requestAnimationFrame(() => {
-			let { start, end } = getTextOffset();
-			text = extractText();
-			render();
-			restoreTextOffset(start, end);
+			const { start, end } = getTextOffset(editor, documentModel);
+			commitText(extractText(editor), start, end);
 			persistText();
 		});
 	}
 
-	function onKeydown(e: KeyboardEvent) {
-		const { start, end } = getTextOffset();
+	function onKeydown(event: KeyboardEvent) {
+		const { start, end } = getTextOffset(editor, documentModel);
 		const hasSelection = start !== end;
 
-		// ═══ TAB / SHIFT+TAB ═══
-		if (e.key === 'Tab' && !(e.ctrlKey || e.metaKey)) {
-			e.preventDefault();
+		if (event.key === 'Tab' && !(event.ctrlKey || event.metaKey)) {
+			event.preventDefault();
 			editorHistory.push({ text, selectionStart: start, selectionEnd: end });
 
 			if (hasSelection) {
-				const { blockStart, blockEnd } = getSelectedBlockBounds(start, end);
+				const { blockStart, blockEnd } = getSelectedBlockBounds(text, { start, end });
 				const block = text.slice(blockStart, blockEnd);
 				const lines = block.split('\n');
 
 				const modified = lines.map((line) => {
-					const parsed = parseLine(line);
-					if (e.shiftKey) {
+					const metadata = getListMetadata(line);
+					if (event.shiftKey) {
 						if (line.startsWith('    ')) return line.slice(4);
-						if (parsed.listLevel === 1) return line.replace(/^- /, '');
+						if (metadata.listLevel === 1) return line.replace(/^- /, '').replace(/^\d+\. /, '');
 						return line;
 					}
-					return '    ' + line;
+
+					return `    ${line}`;
 				});
 
-				const newBlock = modified.join('\n');
-				text = text.slice(0, blockStart) + newBlock + text.slice(blockEnd);
-				renderAndRestoreSelection(blockStart, blockStart + newBlock.length);
+				const nextBlock = modified.join('\n');
+				commitText(
+					text.slice(0, blockStart) + nextBlock + text.slice(blockEnd),
+					blockStart,
+					blockStart + nextBlock.length
+				);
+				persistText();
 				return;
 			}
 
-			const { lineStart, lineEnd } = getCurrentLineBounds(start);
+			const { lineStart, lineEnd } = getCurrentLineBounds(text, start);
 			const lineText = text.slice(lineStart, lineEnd);
-			const parsed = parseLine(lineText);
+			const metadata = getListMetadata(lineText);
 
-			if (e.shiftKey) {
+			if (event.shiftKey) {
 				if (lineText.startsWith('    ')) {
-					text = text.slice(0, lineStart) + lineText.slice(4) + text.slice(lineEnd);
-					renderAndRestore(start - 4);
-				} else if (parsed.listLevel === 1) {
-					text =
-						text.slice(0, lineStart) +
-						lineText.replace(/^- /, '').replace(/^\d+\. /, '') +
-						text.slice(lineEnd);
-					renderAndRestore(Math.max(lineStart, start - 2));
+					commitText(
+						text.slice(0, lineStart) + lineText.slice(4) + text.slice(lineEnd),
+						start - 4,
+						start - 4
+					);
+					persistText();
+					return;
 				}
+
+				if (metadata.listLevel === 1) {
+					const updatedLine = lineText.replace(/^- /, '').replace(/^\d+\. /, '');
+					commitText(
+						text.slice(0, lineStart) + updatedLine + text.slice(lineEnd),
+						Math.max(lineStart, start - metadata.prefix.length),
+						Math.max(lineStart, start - metadata.prefix.length)
+					);
+					persistText();
+					return;
+				}
+
 				return;
 			}
 
-			// TAB inside list → indent the whole line
-			if (parsed.listLevel > 0) {
-				text = text.slice(0, lineStart) + '    ' + text.slice(lineStart);
-				renderAndRestore(start + 4);
+			if (metadata.listLevel > 0) {
+				commitText(text.slice(0, lineStart) + '    ' + text.slice(lineStart), start + 4, start + 4);
+				persistText();
 				return;
 			}
 
-			// NOT a list → normal tab (insert spaces at cursor)
-			text = text.slice(0, start) + '    ' + text.slice(end);
-			renderAndRestore(start + 4);
+			commitText(text.slice(0, start) + '    ' + text.slice(end), start + 4, start + 4);
+			persistText();
 			return;
 		}
 
-		// ═══ ENTER (LIST CONTINUATION) ═══
-		if (e.key === 'Enter') {
-			const { lineStart, lineEnd } = getCurrentLineBounds(start);
+		if (event.key === 'Enter') {
+			event.preventDefault();
+			const { lineStart, lineEnd } = getCurrentLineBounds(text, start);
 			const lineText = text.slice(lineStart, lineEnd);
-			const parsed = parseLine(lineText);
+			const metadata = getListMetadata(lineText);
 
-			if (parsed.listLevel > 0) {
-				e.preventDefault();
+			if (metadata.listLevel > 0) {
 				editorHistory.push({ text, selectionStart: start, selectionEnd: end });
+				const indent = '    '.repeat(metadata.listLevel - 1);
 
-				const indent = '    '.repeat(parsed.listLevel - 1);
-
-				// Empty list item → exit list
-				if (parsed.ordered && lineText.trim().match(/^\d+\.$/)) {
-					text = text.slice(0, lineStart) + text.slice(lineEnd);
-					renderAndRestore(lineStart);
-					return;
-				}
-				if (!parsed.ordered && lineText.trim() === '-') {
-					text = text.slice(0, lineStart) + text.slice(lineEnd);
-					renderAndRestore(lineStart);
+				if (metadata.ordered && lineText.trim().match(/^\d+\.$/)) {
+					commitText(text.slice(0, lineStart) + text.slice(lineEnd), lineStart, lineStart);
+					persistText();
 					return;
 				}
 
-				// Build prefix for new line
-				let prefix: string;
-				if (parsed.ordered) {
-					prefix = indent + (parsed.listNumber + 1) + '. ';
-				} else {
-					prefix = indent + '- ';
+				if (!metadata.ordered && lineText.trim() === '-') {
+					commitText(text.slice(0, lineStart) + text.slice(lineEnd), lineStart, lineStart);
+					persistText();
+					return;
 				}
 
-				text = text.slice(0, start) + '\n' + prefix + text.slice(end);
-
-				renderAndRestore(start + 1 + prefix.length);
-				return;
-			} else {
-				// Normal enter → insert newline
-				e.preventDefault();
-				text = text.slice(0, start) + '\n' + text.slice(end);
-				renderAndRestore(start + 1);
+				const prefix = metadata.ordered ? `${indent}${metadata.listNumber + 1}. ` : `${indent}- `;
+				commitText(
+					text.slice(0, start) + '\n' + prefix + text.slice(end),
+					start + 1 + prefix.length,
+					start + 1 + prefix.length
+				);
+				persistText();
 				return;
 			}
+
+			editorHistory.push({ text, selectionStart: start, selectionEnd: end });
+			commitText(text.slice(0, start) + '\n' + text.slice(end), start + 1, start + 1);
+			persistText();
+			return;
 		}
 
-		// ═══ UNDO / REDO ═══
-		if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {
-			e.preventDefault();
+		if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key === 'z') {
+			event.preventDefault();
 			editorHistory.undo();
 			return;
 		}
-		if ((e.ctrlKey || e.metaKey) && ((e.shiftKey && e.key === 'Z') || e.key === 'y')) {
-			e.preventDefault();
+
+		if (
+			(event.ctrlKey || event.metaKey) &&
+			((event.shiftKey && event.key === 'Z') || event.key === 'y')
+		) {
+			event.preventDefault();
 			editorHistory.redo();
-			return;
 		}
 	}
 
-	// ─── Lifecycle ───────────────────────────────────────────
 	onMount(() => {
 		editorHistory = new EditorHistory(
 			() => {
-				const { start, end } = getTextOffset();
+				const { start, end } = getTextOffset(editor, documentModel);
 				return { text, selectionStart: start, selectionEnd: end };
 			},
 			(state: EditorState) => {
@@ -476,15 +307,15 @@
 		);
 
 		const saved = EditorStorage.load();
-
 		if (saved) {
 			editorHistory.push(saved);
 			applyState(saved);
-		} else {
-			const empty: EditorState = { text: '', selectionStart: 0, selectionEnd: 0 };
-			editorHistory.push(empty);
-			applyState(empty);
+			return;
 		}
+
+		const emptyState: EditorState = { text: '', selectionStart: 0, selectionEnd: 0 };
+		editorHistory.push(emptyState);
+		applyState(emptyState);
 	});
 </script>
 
@@ -539,10 +370,6 @@
 		position: absolute;
 	}
 
-	:global(.editable .fake-placeholder) {
-		color: #999;
-	}
-
 	:global(.editable .line) {
 		display: block;
 		min-height: 1.7em;
@@ -551,22 +378,17 @@
 	}
 
 	:global(.editable .line.list) {
-		padding-left: calc(var(--prefix-width) * 1ch + (var(--list-level)) * 4ch);
-		text-indent: calc(-1 * (var(--prefix-width) * 1ch + (var(--list-level)) * 4ch));
+		padding-left: calc(var(--prefix-width) * 1ch + var(--list-level) * 4ch);
+		text-indent: calc(-1 * (var(--prefix-width) * 1ch + var(--list-level) * 4ch));
 	}
 
-	:global(.editable h1),
-	:global(.editable h2),
-	:global(.editable h3),
-	:global(.editable h4),
-	:global(.editable h5),
-	:global(.editable h6) {
-		all: unset;
+	:global(.editable .line.heading) {
+		font-weight: 700;
 	}
 
-	:global(.editable ul),
-	:global(.editable ol) {
-		all: unset;
+	:global(.editable .syntax-marker) {
+		font-weight: 400;
+		font-style: normal;
 	}
 
 	@media (min-width: 768px) {

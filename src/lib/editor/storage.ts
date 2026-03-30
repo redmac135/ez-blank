@@ -1,4 +1,4 @@
-import { type EditorState } from "./history";
+import { type EditorState } from './history';
 
 export class EditorStorage {
 	public static STORAGE_KEY = 'ez-blank-session-v1';
