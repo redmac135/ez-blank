@@ -1,4 +1,4 @@
-import { renderEditorLine, type EditorDocument } from './parser';
+import { getLineRenderSignature, renderEditorLine, type EditorDocument } from './parser';
 
 export function syncEditorDom(
 	editor: HTMLDivElement,
@@ -14,7 +14,8 @@ export function syncEditorDom(
 	while (
 		start < previousDocument.lines.length &&
 		start < nextDocument.lines.length &&
-		previousDocument.lines[start].raw === nextDocument.lines[start].raw
+		getLineRenderSignature(previousDocument.lines[start]) ===
+			getLineRenderSignature(nextDocument.lines[start])
 	) {
 		start += 1;
 	}
@@ -29,7 +30,8 @@ export function syncEditorDom(
 	while (
 		previousEnd >= start &&
 		nextEnd >= start &&
-		previousDocument.lines[previousEnd].raw === nextDocument.lines[nextEnd].raw
+		getLineRenderSignature(previousDocument.lines[previousEnd]) ===
+			getLineRenderSignature(nextDocument.lines[nextEnd])
 	) {
 		previousEnd -= 1;
 		nextEnd -= 1;

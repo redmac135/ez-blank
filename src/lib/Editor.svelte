@@ -386,6 +386,19 @@
 		font-weight: 700;
 	}
 
+	:global(.editable .line.code) {
+		background: rgba(0, 0, 0, 0.04);
+		font-family: 'Roboto Mono', monospace;
+	}
+
+	:global(.editable .line.code.code_fence) {
+		color: #666;
+	}
+
+	:global(.editable .line.code.code_content) {
+		padding-left: 0;
+	}
+
 	:global(.editable .syntax-marker) {
 		font-weight: 400;
 		font-style: normal;
