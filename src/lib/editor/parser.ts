@@ -77,7 +77,7 @@ export function renderEditorLine(line: EditorLine): string {
 	const body = prefix + (content || (line.raw.length === 0 ? '<br>' : ''));
 
 	if (line.kind === 'ordered_list_item' || line.kind === 'unordered_list_item') {
-		const prefixWidth = line.prefix.length;
+		const prefixWidth = line.prefix.trimStart().length;
 		return `<div class="line list" data-line-id="${line.id}" style="--list-level: ${line.listLevel - 1}; --prefix-width: ${prefixWidth}">${body}</div>`;
 	}
 
