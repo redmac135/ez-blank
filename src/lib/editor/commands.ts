@@ -35,9 +35,10 @@ export function applyEnterKey(text: string, selection: SelectionRange): TextChan
 	}
 
 	if (metadata.ordered && lineText.trim().match(/^\d+\.$/)) {
+		const nextText = text.slice(0, lineStart) + text.slice(lineEnd);
 		return normalizeListEdit(
-			text.slice(0, lineStart) + text.slice(lineEnd),
-			{ start: lineStart, end: lineStart },
+			nextText,
+			getSplitListAffectedRange(nextText, lineStart),
 			{ start: lineStart, end: lineStart }
 		);
 	}
@@ -175,4 +176,11 @@ function getDeleteAffectedRange(
 
 	const end = Math.min(text.length, selection.end + 1);
 	return { start: selection.start, end };
+}
+
+function getSplitListAffectedRange(text: string, boundary: number): SelectionRange {
+	return {
+		start: Math.max(0, boundary - 1),
+		end: Math.min(text.length, boundary + 1)
+	};
 }

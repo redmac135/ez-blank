@@ -63,6 +63,17 @@ test('applyEnterKey inserts a nested ordered item and renumbers only that nested
 	assert.equal(change.selectionEnd, change.selectionStart);
 });
 
+test('applyEnterKey on an empty ordered item in the middle resets the lower list to 1', () => {
+	const source = '1. one\n2. \n3. three\n4. four';
+	const cursor = source.indexOf('2. ');
+
+	const change = applyEnterKey(source, { start: cursor, end: cursor });
+
+	assert.equal(change.text, '1. one\n\n1. three\n2. four');
+	assert.equal(change.selectionStart, source.indexOf('2. '));
+	assert.equal(change.selectionEnd, change.selectionStart);
+});
+
 test('applyDeleteBackward renumbers ordered list siblings after removing a middle item', () => {
 	const source = '1. one\n2. two\n3. three';
 	const start = source.indexOf('2. two');
