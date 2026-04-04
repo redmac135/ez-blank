@@ -9,13 +9,6 @@ export interface TextChange {
 	selectionEnd: number;
 }
 
-export interface ListMetadata {
-	listLevel: number;
-	ordered: boolean;
-	listNumber: number;
-	prefix: string;
-}
-
 export function replaceRange(
 	text: string,
 	selection: SelectionRange,
@@ -88,33 +81,4 @@ export function getSelectedBlockBounds(text: string, selection: SelectionRange) 
 	const blockStart = getCurrentLineBounds(text, selection.start).lineStart;
 	const blockEnd = getCurrentLineBounds(text, selection.end).lineEnd;
 	return { blockStart, blockEnd };
-}
-
-export function getListMetadata(lineText: string): ListMetadata {
-	const unorderedMatch = lineText.match(/^((?: {4})*)- /);
-	if (unorderedMatch) {
-		return {
-			listLevel: unorderedMatch[1].length / 4 + 1,
-			ordered: false,
-			listNumber: 0,
-			prefix: unorderedMatch[0]
-		};
-	}
-
-	const orderedMatch = lineText.match(/^((?: {4})*)(\d+)\. /);
-	if (orderedMatch) {
-		return {
-			listLevel: orderedMatch[1].length / 4 + 1,
-			ordered: true,
-			listNumber: Number.parseInt(orderedMatch[2], 10),
-			prefix: orderedMatch[0]
-		};
-	}
-
-	return {
-		listLevel: 0,
-		ordered: false,
-		listNumber: 0,
-		prefix: ''
-	};
 }

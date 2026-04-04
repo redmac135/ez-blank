@@ -1,5 +1,5 @@
 import { renderSelectionHtml, type EditorDocument } from './parser';
-import { replaceRange, type SelectionRange, type TextChange } from './edits';
+import { replaceRange, type SelectionRange, type TextChange } from './text';
 
 export function writeSelectionToClipboard(
 	clipboardData: DataTransfer | null,

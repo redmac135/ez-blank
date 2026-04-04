@@ -5,15 +5,14 @@
 	import { extractText, getTextOffset, restoreTextOffset } from './editor/selection';
 	import { cutSelection, pasteText, writeSelectionToClipboard } from './editor/clipboard';
 	import {
-		deleteBackward,
-		deleteForward,
-		getCurrentLineBounds,
-		getListMetadata,
-		getSelectedBlockBounds,
-		replaceRange
-	} from './editor/edits';
+		applyDeleteBackward,
+		applyDeleteForward,
+		applyEnterKey,
+		applyTabKey
+	} from './editor/commands';
 	import { EditorHistory, type EditorState } from './editor/history';
 	import { EditorStorage } from './editor/storage';
+	import { replaceRange } from './editor/text';
 
 	let text = '';
 	let documentModel: EditorDocument = buildDocument('');
@@ -139,14 +138,14 @@
 
 		if (event.inputType === 'deleteContentBackward') {
 			event.preventDefault();
-			const change = deleteBackward(text, { start, end });
+			const change = applyDeleteBackward(text, { start, end });
 			applyControlledEdit(change.text, change.selectionStart, change.selectionEnd);
 			return;
 		}
 
 		if (event.inputType === 'deleteContentForward') {
 			event.preventDefault();
-			const change = deleteForward(text, { start, end });
+			const change = applyDeleteForward(text, { start, end });
 			applyControlledEdit(change.text, change.selectionStart, change.selectionEnd);
 			return;
 		}
@@ -170,112 +169,21 @@
 
 	function onKeydown(event: KeyboardEvent) {
 		const { start, end } = getTextOffset(editor, documentModel);
-		const hasSelection = start !== end;
 
 		if (event.key === 'Tab' && !(event.ctrlKey || event.metaKey)) {
 			event.preventDefault();
 			editorHistory.push({ text, selectionStart: start, selectionEnd: end });
-
-			if (hasSelection) {
-				const { blockStart, blockEnd } = getSelectedBlockBounds(text, { start, end });
-				const block = text.slice(blockStart, blockEnd);
-				const lines = block.split('\n');
-
-				const modified = lines.map((line) => {
-					const metadata = getListMetadata(line);
-					if (event.shiftKey) {
-						if (line.startsWith('    ')) return line.slice(4);
-						if (metadata.listLevel === 1) return line.replace(/^- /, '').replace(/^\d+\. /, '');
-						return line;
-					}
-
-					return `    ${line}`;
-				});
-
-				const nextBlock = modified.join('\n');
-				commitText(
-					text.slice(0, blockStart) + nextBlock + text.slice(blockEnd),
-					blockStart,
-					blockStart + nextBlock.length
-				);
-				persistText();
-				return;
-			}
-
-			const { lineStart, lineEnd } = getCurrentLineBounds(text, start);
-			const lineText = text.slice(lineStart, lineEnd);
-			const metadata = getListMetadata(lineText);
-
-			if (event.shiftKey) {
-				if (lineText.startsWith('    ')) {
-					commitText(
-						text.slice(0, lineStart) + lineText.slice(4) + text.slice(lineEnd),
-						start - 4,
-						start - 4
-					);
-					persistText();
-					return;
-				}
-
-				if (metadata.listLevel === 1) {
-					const updatedLine = lineText.replace(/^- /, '').replace(/^\d+\. /, '');
-					commitText(
-						text.slice(0, lineStart) + updatedLine + text.slice(lineEnd),
-						Math.max(lineStart, start - metadata.prefix.length),
-						Math.max(lineStart, start - metadata.prefix.length)
-					);
-					persistText();
-					return;
-				}
-
-				return;
-			}
-
-			if (metadata.listLevel > 0) {
-				commitText(text.slice(0, lineStart) + '    ' + text.slice(lineStart), start + 4, start + 4);
-				persistText();
-				return;
-			}
-
-			commitText(text.slice(0, start) + '    ' + text.slice(end), start + 4, start + 4);
+			const change = applyTabKey(text, { start, end }, event.shiftKey);
+			commitText(change.text, change.selectionStart, change.selectionEnd);
 			persistText();
 			return;
 		}
 
 		if (event.key === 'Enter') {
 			event.preventDefault();
-			const { lineStart, lineEnd } = getCurrentLineBounds(text, start);
-			const lineText = text.slice(lineStart, lineEnd);
-			const metadata = getListMetadata(lineText);
-
-			if (metadata.listLevel > 0) {
-				editorHistory.push({ text, selectionStart: start, selectionEnd: end });
-				const indent = '    '.repeat(metadata.listLevel - 1);
-
-				if (metadata.ordered && lineText.trim().match(/^\d+\.$/)) {
-					commitText(text.slice(0, lineStart) + text.slice(lineEnd), lineStart, lineStart);
-					persistText();
-					return;
-				}
-
-				if (!metadata.ordered && lineText.trim() === '-') {
-					commitText(text.slice(0, lineStart) + text.slice(lineEnd), lineStart, lineStart);
-					persistText();
-					return;
-				}
-
-				const prefix = metadata.ordered ? `${indent}${metadata.listNumber + 1}. ` : `${indent}- `;
-				commitText(
-					text.slice(0, start) + '\n' + prefix + text.slice(end),
-					start + 1 + prefix.length,
-					start + 1 + prefix.length
-				);
-				persistText();
-				return;
-			}
-
 			editorHistory.push({ text, selectionStart: start, selectionEnd: end });
-			commitText(text.slice(0, start) + '\n' + text.slice(end), start + 1, start + 1);
+			const change = applyEnterKey(text, { start, end });
+			commitText(change.text, change.selectionStart, change.selectionEnd);
 			persistText();
 			return;
 		}
