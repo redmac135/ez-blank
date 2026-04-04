@@ -516,6 +516,16 @@ function parseInline(raw: string, startOffset: number): InlineNode[] {
 		const starIndex = raw.indexOf('*', index);
 		if (starIndex !== -1) nextMarker = starIndex;
 
+		if (nextMarker === index) {
+			inline.push({
+				type: 'text',
+				range: { start: startOffset + index, end: startOffset + index + 1 },
+				text: raw[index]
+			} satisfies TextNode);
+			index += 1;
+			continue;
+		}
+
 		const text = raw.slice(index, nextMarker);
 		inline.push({
 			type: 'text',
@@ -537,6 +547,7 @@ function parseFormattedNode(raw: string, startOffset: number, index: number) {
 
 		const contentStart = index + marker.length;
 		const contentEnd = close;
+		if (contentStart >= contentEnd) continue;
 		if (raw[contentStart] === ' ' || raw[contentEnd - 1] === ' ') continue;
 
 		const type = marker === '***' ? 'strong_emphasis' : marker === '**' ? 'strong' : 'emphasis';
