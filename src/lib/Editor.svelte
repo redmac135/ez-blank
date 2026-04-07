@@ -11,14 +11,15 @@
 		applyTabKey
 	} from './editor/commands';
 	import { EditorHistory, type EditorState } from './editor/history';
-	import { EditorStorage } from './editor/storage';
 	import { replaceRange } from './editor/text';
 
-	let text = '';
+	export let initialState: EditorState = { text: '', selectionStart: 0, selectionEnd: 0 };
+	export let onChange: (state: EditorState) => void = () => {};
+
+	let text = initialState.text;
 	let documentModel: EditorDocument = buildDocument('');
 	let editor: HTMLDivElement;
 	let editorHistory: EditorHistory;
-	let saveTimeout: number;
 
 	type EditType = 'typing' | 'deleting' | 'command';
 	let lastEditType: EditType | null = null;
@@ -39,31 +40,27 @@
 		restoreTextOffset(editor, documentModel, start, end);
 	}
 
-	function applyState(state: EditorState) {
-		const nextDocument = buildDocument(state.text);
-		text = nextDocument.text;
-		documentModel = nextDocument;
-		syncEditorDom(editor, null, nextDocument);
-		restoreTextOffset(editor, documentModel, state.selectionStart, state.selectionEnd);
+	function applyState(state: EditorState, forceRerender = false) {
+		if (forceRerender) {
+			const nextDocument = buildDocument(state.text);
+			text = nextDocument.text;
+			documentModel = nextDocument;
+			syncEditorDom(editor, null, nextDocument);
+			restoreTextOffset(editor, documentModel, state.selectionStart, state.selectionEnd);
+			return;
+		}
+
+		commitText(state.text, state.selectionStart, state.selectionEnd);
 	}
 
-	function persistText() {
+	function emitState(selectionStart: number, selectionEnd: number) {
+		onChange({ text, selectionStart, selectionEnd });
+	}
+
+	function reportSelection() {
+		if (!editor) return;
 		const { start, end } = getTextOffset(editor, documentModel);
-		clearTimeout(saveTimeout);
-		saveTimeout = window.setTimeout(() => {
-			EditorStorage.save({ text, selectionStart: start, selectionEnd: end });
-		}, 300);
-	}
-
-	function handleBeforeUnload() {
-		const { start, end } = getTextOffset(editor, documentModel);
-		EditorStorage.save({ text, selectionStart: start, selectionEnd: end });
-	}
-
-	function handleStorage(event: StorageEvent) {
-		if (event.key !== EditorStorage.STORAGE_KEY || !event.newValue) return;
-		const state = EditorStorage.load();
-		if (state) applyState(state);
+		emitState(start, end);
 	}
 
 	function onCopy(event: ClipboardEvent) {
@@ -79,7 +76,7 @@
 		editorHistory.push({ text, selectionStart: start, selectionEnd: end });
 		const change = cutSelection(text, { start, end });
 		commitText(change.text, change.selectionStart, change.selectionEnd);
-		persistText();
+		emitState(change.selectionStart, change.selectionEnd);
 	}
 
 	function onPaste(event: ClipboardEvent) {
@@ -91,7 +88,7 @@
 		editorHistory.push({ text, selectionStart: start, selectionEnd: end });
 		const change = pasteText(text, { start, end }, pasted);
 		commitText(change.text, change.selectionStart, change.selectionEnd);
-		persistText();
+		emitState(change.selectionStart, change.selectionEnd);
 	}
 
 	function applyControlledEdit(
@@ -102,7 +99,7 @@
 		isApplyingControlledEdit = true;
 		commitText(nextText, selectionStart, selectionEnd);
 		isApplyingControlledEdit = false;
-		persistText();
+		emitState(selectionStart, selectionEnd);
 	}
 
 	function onBeforeInput(event: InputEvent) {
@@ -163,7 +160,7 @@
 		requestAnimationFrame(() => {
 			const { start, end } = getTextOffset(editor, documentModel);
 			commitText(extractText(editor), start, end);
-			persistText();
+			emitState(start, end);
 		});
 	}
 
@@ -175,7 +172,7 @@
 			editorHistory.push({ text, selectionStart: start, selectionEnd: end });
 			const change = applyTabKey(text, { start, end }, event.shiftKey);
 			commitText(change.text, change.selectionStart, change.selectionEnd);
-			persistText();
+			emitState(change.selectionStart, change.selectionEnd);
 			return;
 		}
 
@@ -184,7 +181,7 @@
 			editorHistory.push({ text, selectionStart: start, selectionEnd: end });
 			const change = applyEnterKey(text, { start, end });
 			commitText(change.text, change.selectionStart, change.selectionEnd);
-			persistText();
+			emitState(change.selectionStart, change.selectionEnd);
 			return;
 		}
 
@@ -211,23 +208,15 @@
 			},
 			(state: EditorState) => {
 				applyState(state);
+				emitState(state.selectionStart, state.selectionEnd);
 			}
 		);
 
-		const saved = EditorStorage.load();
-		if (saved) {
-			editorHistory.push(saved);
-			applyState(saved);
-			return;
-		}
-
-		const emptyState: EditorState = { text: '', selectionStart: 0, selectionEnd: 0 };
-		editorHistory.push(emptyState);
-		applyState(emptyState);
+		editorHistory.push(initialState);
+		applyState(initialState, true);
+		editor.focus();
 	});
 </script>
-
-<svelte:window on:beforeunload={handleBeforeUnload} on:storage={handleStorage} />
 
 <main class="editor">
 	<div
@@ -242,6 +231,9 @@
 		on:copy={onCopy}
 		on:cut={onCut}
 		on:paste={onPaste}
+		on:mouseup={reportSelection}
+		on:keyup={reportSelection}
+		on:focusout={reportSelection}
 		aria-label="Markdown editor"
 		role="textbox"
 		tabindex="0"
@@ -260,7 +252,7 @@
 
 	.editable {
 		width: 100%;
-		padding: 1.5rem;
+		padding: 4rem 1.5rem;
 		outline: none;
 		white-space: pre-wrap;
 		word-break: break-word;
