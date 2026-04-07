@@ -609,7 +609,8 @@ function renderBlockSelection(
 	}
 
 	if (block.type === 'heading') {
-		return `<p><strong>${renderSemanticInlineSelection(sourceText, block.inline, start, end) || '<br>'}</strong></p>`;
+		const tag = `h${block.level}`;
+		return `<${tag}>${renderSemanticInlineSelection(sourceText, block.inline, start, end) || '<br>'}</${tag}>`;
 	}
 
 	if (block.type === 'code_block') {

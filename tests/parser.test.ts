@@ -206,6 +206,24 @@ test('renderSelectionHtml preserves semantic markup for partial selections', () 
 	);
 });
 
+test('renderSelectionHtml copies headings as semantic heading tags', () => {
+	const document = buildDocument('## Title');
+
+	assert.equal(
+		renderSelectionHtml(document, 0, document.text.length),
+		'<div style="white-space: pre-wrap;"><h2>Title</h2></div>'
+	);
+});
+
+test('renderSelectionHtml preserves heading level for partial heading selections', () => {
+	const document = buildDocument('#### Title');
+
+	assert.equal(
+		renderSelectionHtml(document, 5, 7),
+		'<div style="white-space: pre-wrap;"><h4>Ti</h4></div>'
+	);
+});
+
 test('renderSelectionHtml omits syntax markers for list content selections', () => {
 	const document = buildDocument('- *item*');
 
