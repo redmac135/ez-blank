@@ -307,6 +307,18 @@
 		padding-left: 0;
 	}
 
+	:global(.editable .inline-code) {
+		background: rgba(0, 0, 0, 0.04);
+		font-family: 'Roboto Mono', monospace;
+		border-radius: 0.2rem;
+		padding: 0 0.15rem;
+	}
+
+	:global(.editable .inline-code .code-marker) {
+		font-weight: inherit;
+		font-style: inherit;
+	}
+
 	:global(.editable .syntax-marker) {
 		font-weight: 400;
 		font-style: normal;

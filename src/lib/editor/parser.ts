@@ -66,7 +66,7 @@ export function buildDocument(rawText: string): EditorDocument {
 }
 
 export function normalizeText(rawText: string): string {
-	return rawText;
+	return rawText.replace(/\r\n?/g, '\n');
 }
 
 export function renderEditorLine(line: EditorLine): string {
@@ -515,6 +515,8 @@ function parseInline(raw: string, startOffset: number): InlineNode[] {
 		let nextMarker = raw.length;
 		const starIndex = raw.indexOf('*', index);
 		if (starIndex !== -1) nextMarker = starIndex;
+		const backtickIndex = raw.indexOf('`', index);
+		if (backtickIndex !== -1) nextMarker = Math.min(nextMarker, backtickIndex);
 
 		if (nextMarker === index) {
 			inline.push({
@@ -539,7 +541,7 @@ function parseInline(raw: string, startOffset: number): InlineNode[] {
 }
 
 function parseFormattedNode(raw: string, startOffset: number, index: number) {
-	for (const marker of ['***', '**', '*'] as const) {
+	for (const marker of ['`', '***', '**', '*'] as const) {
 		if (!raw.startsWith(marker, index)) continue;
 
 		const close = raw.indexOf(marker, index + marker.length);
@@ -548,9 +550,16 @@ function parseFormattedNode(raw: string, startOffset: number, index: number) {
 		const contentStart = index + marker.length;
 		const contentEnd = close;
 		if (contentStart >= contentEnd) continue;
-		if (raw[contentStart] === ' ' || raw[contentEnd - 1] === ' ') continue;
+		if (marker !== '`' && (raw[contentStart] === ' ' || raw[contentEnd - 1] === ' ')) continue;
 
-		const type = marker === '***' ? 'strong_emphasis' : marker === '**' ? 'strong' : 'emphasis';
+		const type =
+			marker === '`'
+				? 'code'
+				: marker === '***'
+					? 'strong_emphasis'
+					: marker === '**'
+						? 'strong'
+						: 'emphasis';
 
 		return {
 			node: {
@@ -580,8 +589,14 @@ function renderEditorInline(inline: InlineNode[]): string {
 				return renderEditorText(node.text);
 			}
 
-			const marker = `<span class="syntax-marker">${escapeHtml(node.marker)}</span>`;
 			const content = escapeHtml(node.text);
+
+			if (node.type === 'code') {
+				const marker = `<span class="syntax-marker code-marker">${escapeHtml(node.marker)}</span>`;
+				return `<code class="inline-code">${marker}${content}${marker}</code>`;
+			}
+
+			const marker = `<span class="syntax-marker">${escapeHtml(node.marker)}</span>`;
 
 			if (node.type === 'emphasis') {
 				return `${marker}<em>${content}</em>${marker}`;
@@ -677,6 +692,11 @@ function renderSemanticInlineSelection(
 
 		if (node.type === 'strong') {
 			parts.push(`<strong>${escapeHtmlForClipboard(innerSlice)}</strong>`);
+			continue;
+		}
+
+		if (node.type === 'code') {
+			parts.push(`<code>${escapeHtmlForClipboard(innerSlice)}</code>`);
 			continue;
 		}
 

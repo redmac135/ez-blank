@@ -41,13 +41,29 @@ export function extractText(editor: HTMLDivElement): string {
 	return lines.map((line) => line.textContent ?? '').join('\n');
 }
 
+export function getEditorContainerOffset(documentModel: EditorDocument, childOffset: number): number {
+	if (childOffset <= 0 || documentModel.lines.length === 0) {
+		return 0;
+	}
+
+	if (childOffset >= documentModel.lines.length) {
+		return documentModel.text.length;
+	}
+
+	return documentModel.lines[childOffset]?.range.start ?? documentModel.text.length;
+}
+
 function countOffset(
 	editor: HTMLDivElement,
 	documentModel: EditorDocument,
 	node: Node,
 	offset: number
 ): number {
-	const lineElement = getLineElement(editor, node);
+	if (node === editor) {
+		return getEditorContainerOffset(documentModel, offset);
+	}
+
+	const lineElement = getLineElement(node);
 	if (!lineElement) return documentModel.text.length;
 
 	const lineIndex = Number.parseInt(lineElement.dataset.lineIndex ?? '0', 10);
@@ -102,11 +118,7 @@ function findTextPosition(root: Node, offset: number): { node: Node; offset: num
 	return { node: root, offset: Math.min(offset, root.childNodes.length) };
 }
 
-function getLineElement(editor: HTMLDivElement, node: Node): HTMLElement | null {
-	if (node === editor) {
-		return editor.lastElementChild as HTMLElement | null;
-	}
-
+function getLineElement(node: Node): HTMLElement | null {
 	if (node.nodeType === Node.ELEMENT_NODE) {
 		return (node as Element).closest('.line') as HTMLElement | null;
 	}

@@ -19,6 +19,16 @@ test('buildDocument keeps an empty document stable', () => {
 	assert.equal(renderEditorLine(line), '<div class="line" data-line-id="line-0"><br></div>');
 });
 
+test('buildDocument normalizes CRLF and CR line endings to LF', () => {
+	const document = buildDocument('alpha\r\nbeta\rgamma');
+
+	assert.equal(document.text, 'alpha\nbeta\ngamma');
+	assert.equal(document.lines.length, 3);
+	assert.equal(document.lines[0]?.raw, 'alpha');
+	assert.equal(document.lines[1]?.raw, 'beta');
+	assert.equal(document.lines[2]?.raw, 'gamma');
+});
+
 test('plain text escapes HTML in rendered output', () => {
 	const { line } = getOnlyLine('<tag> & text');
 
@@ -90,6 +100,36 @@ test('valid strong and strong emphasis render correctly', () => {
 	assert.equal(
 		renderEditorLine(strongEmphasis),
 		'<div class="line" data-line-id="line-0"><span class="syntax-marker">***</span><strong><em>both</em></strong><span class="syntax-marker">***</span></div>'
+	);
+});
+
+test('inline code renders syntax markers and code styling', () => {
+	const { line } = getOnlyLine('use `value` here');
+
+	assert.equal(line.inline[1]?.type, 'code');
+	assert.equal(
+		renderEditorLine(line),
+		'<div class="line" data-line-id="line-0">use <code class="inline-code"><span class="syntax-marker code-marker">`</span>value<span class="syntax-marker code-marker">`</span></code> here</div>'
+	);
+});
+
+test('unclosed inline code marker remains plain text', () => {
+	const { line } = getOnlyLine('use `value here');
+
+	assert.equal(
+		renderEditorLine(line),
+		'<div class="line" data-line-id="line-0">use `value here</div>'
+	);
+});
+
+test('inline code allows leading and trailing spaces inside backticks', () => {
+	const { line } = getOnlyLine('use ` value ` here');
+
+	assert.equal(line.inline[1]?.type, 'code');
+	assert.equal(line.inline[1]?.text, ' value ');
+	assert.equal(
+		renderEditorLine(line),
+		'<div class="line" data-line-id="line-0">use <code class="inline-code"><span class="syntax-marker code-marker">`</span> value <span class="syntax-marker code-marker">`</span></code> here</div>'
 	);
 });
 
@@ -239,6 +279,17 @@ test('renderSelectionHtml preserves code block text and spacing', () => {
 	assert.equal(
 		renderSelectionHtml(document, 6, 10),
 		'<div style="white-space: pre-wrap;"><pre><code>&nbsp;&nbsp;x</code></pre></div>'
+	);
+});
+
+test('renderSelectionHtml preserves inline code semantics', () => {
+	const document = buildDocument('use `value` here');
+	const start = document.text.indexOf('value');
+	const end = start + 'value'.length;
+
+	assert.equal(
+		renderSelectionHtml(document, start, end),
+		'<div style="white-space: pre-wrap;"><p><code>value</code></p></div>'
 	);
 });
 

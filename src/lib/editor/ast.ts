@@ -10,7 +10,7 @@ export interface TextNode {
 }
 
 export interface FormattedNode {
-	type: 'emphasis' | 'strong' | 'strong_emphasis';
+	type: 'emphasis' | 'strong' | 'strong_emphasis' | 'code';
 	range: SourceRange;
 	contentRange: SourceRange;
 	marker: string;
