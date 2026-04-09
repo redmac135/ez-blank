@@ -7,6 +7,15 @@
 		applyHydratedSession,
 		applySessionUpdate
 	} from '$lib/editor/app-state';
+	import {
+		cycleCountVisibility,
+		DEFAULT_PREFERENCES,
+		getCountVisibilityLabel,
+		normalizePreferences,
+		type CountVisibility,
+		type EditorPreferences,
+		type ThemeMode
+	} from '$lib/editor/preferences';
 	import { type EditorState } from '$lib/editor/history';
 	import { EditorStorage } from '$lib/editor/storage';
 	import {
@@ -27,14 +36,18 @@
 	let titleDraft = '';
 	let titleInput: HTMLInputElement | null = null;
 	let countButton: HTMLButtonElement | null = null;
+	let settingsButton: HTMLButtonElement | null = null;
 	let countMenuOpen = false;
+	let settingsMenuOpen = false;
 	let countDisplayMode: 'words' | 'characters' | 'paragraphs' | 'lines' = 'words';
 	let chromeVisible = true;
 	let previousActiveText = '';
 	let hideChromeTimeout: ReturnType<typeof setTimeout> | null = null;
+	let preferences: EditorPreferences = DEFAULT_PREFERENCES;
 
 	const TOP_REVEAL_HEIGHT = 112;
 	const CHROME_HIDE_DELAY = 1400;
+	const PREFERENCES_KEY = 'ez-blank-preferences-v1';
 
 	$: activePage = getActivePage(session);
 	$: activeText = activePage.content;
@@ -51,8 +64,13 @@
 	] as const;
 	$: currentCountLabel =
 		countOptions.find((option) => option.id === countDisplayMode)?.label ?? countOptions[0].label;
+	$: countVisibleInChrome = preferences.countVisibility !== 'hidden';
+	$: countPinnedVisible = preferences.countVisibility === 'pinned';
+	$: countVisible = countVisibleInChrome && (chromeVisible || countPinnedVisible || countMenuOpen);
+	$: countDockedRight = countPinnedVisible && !chromeVisible && !settingsMenuOpen;
+	$: pageTheme = preferences.themeMode;
 
-	$: if (!hasDocumentContent || drawerOpen || countMenuOpen) {
+	$: if (!hasDocumentContent || drawerOpen || countMenuOpen || settingsMenuOpen) {
 		revealChrome(true);
 	}
 
@@ -179,14 +197,14 @@
 	}
 
 	function handleStorage(event: StorageEvent) {
-		if (
-			event.key !== EditorStorage.STORAGE_KEY &&
-			event.key !== EditorStorage.LEGACY_STORAGE_KEY
-		) {
+		if (event.key === PREFERENCES_KEY) {
+			preferences = loadPreferences();
 			return;
 		}
 
-		session = EditorStorage.load();
+		if (event.key === EditorStorage.STORAGE_KEY || event.key === EditorStorage.LEGACY_STORAGE_KEY) {
+			session = EditorStorage.load();
+		}
 	}
 
 	function getWordCount(value: string) {
@@ -218,7 +236,7 @@
 
 	function scheduleChromeHide() {
 		clearHideChromeTimeout();
-		if (!hasDocumentContent || drawerOpen || countMenuOpen) return;
+		if (!hasDocumentContent || drawerOpen || countMenuOpen || settingsMenuOpen) return;
 
 		hideChromeTimeout = setTimeout(() => {
 			chromeVisible = false;
@@ -238,6 +256,7 @@
 
 	function toggleCountMenu() {
 		countMenuOpen = !countMenuOpen;
+		settingsMenuOpen = false;
 		if (countMenuOpen) {
 			revealChrome(true);
 			return;
@@ -254,6 +273,43 @@
 		scheduleChromeHide();
 	}
 
+	function toggleSettingsMenu() {
+		settingsMenuOpen = !settingsMenuOpen;
+		countMenuOpen = false;
+		if (settingsMenuOpen) {
+			revealChrome(true);
+			return;
+		}
+
+		scheduleChromeHide();
+	}
+
+	function updatePreferences(nextPreferences: EditorPreferences) {
+		preferences = nextPreferences;
+		savePreferences(nextPreferences);
+	}
+
+	function toggleThemeMode() {
+		updatePreferences({
+			...preferences,
+			themeMode: preferences.themeMode === 'dark' ? 'light' : 'dark'
+		});
+	}
+
+	function toggleSpellcheck() {
+		updatePreferences({
+			...preferences,
+			spellcheckEnabled: !preferences.spellcheckEnabled
+		});
+	}
+
+	function cycleWordCountVisibility() {
+		updatePreferences({
+			...preferences,
+			countVisibility: cycleCountVisibility(preferences.countVisibility)
+		});
+	}
+
 	function handleMouseMove(event: MouseEvent) {
 		if (event.clientY <= TOP_REVEAL_HEIGHT) {
 			revealChrome();
@@ -262,14 +318,28 @@
 
 	function handleWindowPointerDown(event: MouseEvent) {
 		const target = event.target;
-		if (!(target instanceof Node) || !countMenuOpen) return;
-		if (
-			countButton?.contains(target) ||
-			(target instanceof Element && target.closest('.count-control'))
-		) {
-			return;
+		if (!(target instanceof Node)) return;
+
+		if (countMenuOpen) {
+			if (
+				countButton?.contains(target) ||
+				(target instanceof Element && target.closest('.count-control'))
+			) {
+				return;
+			}
+			countMenuOpen = false;
 		}
-		countMenuOpen = false;
+
+		if (settingsMenuOpen) {
+			if (
+				settingsButton?.contains(target) ||
+				(target instanceof Element && target.closest('.settings-control'))
+			) {
+				return;
+			}
+			settingsMenuOpen = false;
+		}
+
 		scheduleChromeHide();
 	}
 
@@ -278,6 +348,11 @@
 
 		if (countMenuOpen) {
 			countMenuOpen = false;
+			scheduleChromeHide();
+		}
+
+		if (settingsMenuOpen) {
+			settingsMenuOpen = false;
 			scheduleChromeHide();
 		}
 
@@ -291,16 +366,44 @@
 		const hydratedState = applyHydratedSession({ session, loaded }, EditorStorage.load());
 		session = hydratedState.session;
 		loaded = hydratedState.loaded;
+		preferences = loadPreferences();
 		previousActiveText = getActivePage(session).content;
+		applyTheme(preferences.themeMode);
 	});
 
 	onDestroy(() => {
 		clearHideChromeTimeout();
 	});
 
+	$: if (loaded) {
+		applyTheme(pageTheme);
+	}
+
 	$: deletePage = deletePageId
 		? session.pages.find((page) => page.id === deletePageId) ?? null
 		: null;
+
+	function loadPreferences(): EditorPreferences {
+		try {
+			const saved = localStorage.getItem(PREFERENCES_KEY);
+			return saved ? normalizePreferences(JSON.parse(saved)) : DEFAULT_PREFERENCES;
+		} catch (e) {
+			console.error('Failed to load editor preferences:', e);
+			return DEFAULT_PREFERENCES;
+		}
+	}
+
+	function savePreferences(nextPreferences: EditorPreferences) {
+		try {
+			localStorage.setItem(PREFERENCES_KEY, JSON.stringify(nextPreferences));
+		} catch (e) {
+			console.error('Failed to save editor preferences:', e);
+		}
+	}
+
+	function applyTheme(themeMode: ThemeMode) {
+		document.body.dataset.theme = themeMode;
+	}
 </script>
 
 <svelte:window
@@ -324,7 +427,47 @@
 				<span></span>
 				<span></span>
 			</button>
+			<div class="settings-control">
+				<button
+					bind:this={settingsButton}
+					class="settings-toggle"
+					type="button"
+					aria-haspopup="menu"
+					aria-expanded={settingsMenuOpen}
+					aria-label="Open editor settings"
+					on:click={toggleSettingsMenu}
+				>
+					<span></span>
+					<span></span>
+					<span></span>
+				</button>
+				{#if settingsMenuOpen}
+					<FloatingMenu label="Editor settings" verticalOffset="0.45rem">
+						<button type="button" on:click={toggleThemeMode}>
+							{preferences.themeMode === 'dark' ? 'Light mode' : 'Dark mode'}
+						</button>
+						<button type="button" on:click={toggleSpellcheck}>
+							{preferences.spellcheckEnabled ? 'Spellcheck on' : 'Spellcheck off'}
+						</button>
+						<button
+							type="button"
+							aria-label={`Cycle word count visibility, currently ${getCountVisibilityLabel(preferences.countVisibility).toLowerCase()}`}
+							on:click={cycleWordCountVisibility}
+						>
+							{getCountVisibilityLabel(preferences.countVisibility)}
+						</button>
+					</FloatingMenu>
+				{/if}
+			</div>
+		</div>
+	</div>
 
+	<div
+		class:count-visible={countVisible}
+		class:docked-right={countDockedRight}
+		class="count-shell"
+	>
+		{#if countVisibleInChrome}
 			<div class="count-control">
 				<button
 					bind:this={countButton}
@@ -352,7 +495,7 @@
 					</FloatingMenu>
 				{/if}
 			</div>
-		</div>
+		{/if}
 	</div>
 
 	{#if drawerOpen}
@@ -456,6 +599,7 @@
 						selectionStart: activePage.selectionStart,
 						selectionEnd: activePage.selectionEnd
 					}}
+					spellcheckEnabled={preferences.spellcheckEnabled}
 					onChange={updateActivePage}
 				/>
 			{/key}
@@ -465,10 +609,48 @@
 
 <style>
 	:global(body) {
+		--page-background: #fff;
+		--text-color: #111;
+		--muted-text-color: rgba(0, 0, 0, 0.68);
+		--surface-color: rgba(255, 255, 255, 0.94);
+		--surface-border-color: rgba(0, 0, 0, 0.08);
+		--surface-shadow-color: rgba(0, 0, 0, 0.06);
+		--hover-background-color: rgba(0, 0, 0, 0.035);
+		--chrome-scrim-color: rgba(255, 255, 255, 0.72);
+		--modal-scrim-color: rgba(255, 255, 255, 0.8);
+		--line-color: #111;
+		--accent-background: rgba(0, 0, 0, 0.035);
+		--editor-caret-color: #555;
+		--editor-selection-color: rgba(180, 213, 255, 0.6);
+		--editor-placeholder-color: #999;
+		--editor-code-background: rgba(0, 0, 0, 0.04);
+		--editor-muted-color: #666;
 		margin: 0;
-		background: #fff;
-		color: #111;
+		background: var(--page-background);
+		color: var(--text-color);
 		font-family: 'Roboto Mono', monospace;
+		transition:
+			background-color 180ms ease,
+			color 180ms ease;
+	}
+
+	:global(body[data-theme='dark']) {
+		--page-background: #121314;
+		--text-color: #f1f1ec;
+		--muted-text-color: rgba(241, 241, 236, 0.7);
+		--surface-color: rgba(26, 28, 30, 0.94);
+		--surface-border-color: rgba(255, 255, 255, 0.12);
+		--surface-shadow-color: rgba(0, 0, 0, 0.34);
+		--hover-background-color: rgba(255, 255, 255, 0.06);
+		--chrome-scrim-color: rgba(18, 19, 20, 0.78);
+		--modal-scrim-color: rgba(18, 19, 20, 0.82);
+		--line-color: #f1f1ec;
+		--accent-background: rgba(255, 255, 255, 0.07);
+		--editor-caret-color: #d9d9d2;
+		--editor-selection-color: rgba(103, 141, 204, 0.45);
+		--editor-placeholder-color: rgba(241, 241, 236, 0.42);
+		--editor-code-background: rgba(255, 255, 255, 0.06);
+		--editor-muted-color: rgba(241, 241, 236, 0.56);
 	}
 
 	.page-shell {
@@ -488,25 +670,27 @@
 			0
 			max(0.75rem, env(safe-area-inset-left));
 		opacity: 0;
-		transform: translateY(-0.4rem);
 		pointer-events: none;
-		transition:
-			opacity 180ms ease,
-			transform 180ms ease;
+		transition: opacity 180ms ease;
 	}
 
 	.top-bar-shell.visible {
 		opacity: 1;
-		transform: translateY(0);
 		pointer-events: auto;
 	}
 
 	.top-bar {
-		display: flex;
-		align-items: flex-start;
-		justify-content: space-between;
+		position: relative;
 		width: 100%;
 		box-sizing: border-box;
+		min-height: 2rem;
+	}
+
+	.settings-control,
+	.count-shell {
+		position: absolute;
+		top: 0;
+		right: 0;
 	}
 
 	.count-control {
@@ -514,8 +698,33 @@
 		min-width: 0;
 	}
 
+	.count-shell {
+		z-index: 21;
+		padding:
+			max(0.75rem, env(safe-area-inset-top))
+			max(0.75rem, env(safe-area-inset-right))
+			0
+			max(0.75rem, env(safe-area-inset-left));
+		opacity: 0;
+		pointer-events: none;
+		transform: translateX(calc(-2.55rem));
+		transition:
+			opacity 180ms ease,
+			transform 220ms ease;
+	}
+
+	.count-shell.count-visible {
+		opacity: 1;
+		pointer-events: auto;
+	}
+
+	.count-shell.docked-right {
+		transform: translateX(0);
+	}
+
 	.count-toggle,
-	.drawer-toggle {
+	.drawer-toggle,
+	.settings-toggle {
 		position: static;
 		border: 0;
 		background: transparent;
@@ -566,7 +775,32 @@
 		display: block;
 		width: 1rem;
 		height: 1px;
-		background: #111;
+		background: var(--line-color);
+	}
+
+	.settings-control {
+		position: absolute;
+		top: 0;
+		right: 0;
+	}
+
+	.settings-toggle {
+		width: 2rem;
+		height: 2rem;
+		padding: 0;
+		border-radius: 999px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.2rem;
+	}
+
+	.settings-toggle span {
+		display: block;
+		width: 3px;
+		height: 3px;
+		border-radius: 999px;
+		background: var(--line-color);
 	}
 
 	.scrim {
@@ -574,7 +808,7 @@
 		inset: 0;
 		z-index: 10;
 		border: 0;
-		background: rgba(255, 255, 255, 0.72);
+		background: var(--chrome-scrim-color);
 	}
 
 	.modal-scrim {
@@ -582,7 +816,7 @@
 		inset: 0;
 		z-index: 30;
 		border: 0;
-		background: rgba(255, 255, 255, 0.8);
+		background: var(--modal-scrim-color);
 	}
 
 	.modal {
@@ -593,10 +827,10 @@
 		width: min(22rem, calc(100vw - 2rem));
 		padding: 1rem;
 		box-sizing: border-box;
-		background: #fff;
-		border: 1px solid rgba(0, 0, 0, 0.08);
+		background: var(--surface-color);
+		border: 1px solid var(--surface-border-color);
 		border-radius: 0.55rem;
-		box-shadow: 0 18px 50px rgba(0, 0, 0, 0.08);
+		box-shadow: 0 18px 50px var(--surface-shadow-color);
 		transform: translate(-50%, -50%);
 	}
 
@@ -613,7 +847,7 @@
 	.modal p {
 		margin-top: 0.45rem;
 		font-size: 0.82rem;
-		color: rgba(0, 0, 0, 0.65);
+		color: var(--muted-text-color);
 	}
 
 	.modal-actions {
@@ -634,7 +868,7 @@
 	}
 
 	.modal-button:hover {
-		background: rgba(0, 0, 0, 0.035);
+		background: var(--hover-background-color);
 	}
 
 	.modal-button-delete {
@@ -655,8 +889,8 @@
 		width: min(18rem, 82vw);
 		padding: 4.25rem 1rem 1rem;
 		box-sizing: border-box;
-		background: #fff;
-		border-right: 1px solid rgba(0, 0, 0, 0.08);
+		background: var(--surface-color);
+		border-right: 1px solid var(--surface-border-color);
 		transform: translateX(-100%);
 		transition: transform 180ms ease;
 	}
@@ -713,7 +947,7 @@
 	}
 
 	.page-row.active {
-		background: rgba(0, 0, 0, 0.035);
+		background: var(--accent-background);
 	}
 
 	.page-tab {
@@ -755,7 +989,7 @@
 		width: 3px;
 		height: 3px;
 		border-radius: 999px;
-		background: #111;
+		background: var(--line-color);
 	}
 
 	.page-row:hover .menu-toggle,
@@ -791,11 +1025,19 @@
 	.workspace {
 		width: 100%;
 		min-height: 100vh;
-		background: #fff;
+		background: var(--page-background);
 	}
 
 	@media (max-width: 767px) {
 		.top-bar-shell {
+			padding:
+				max(0.6rem, env(safe-area-inset-top))
+				max(0.6rem, env(safe-area-inset-right))
+				0
+				max(0.6rem, env(safe-area-inset-left));
+		}
+
+		.count-shell {
 			padding:
 				max(0.6rem, env(safe-area-inset-top))
 				max(0.6rem, env(safe-area-inset-right))

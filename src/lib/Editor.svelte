@@ -16,6 +16,7 @@
 
 	export let initialState: EditorState = { text: '', selectionStart: 0, selectionEnd: 0 };
 	export let onChange: (state: EditorState) => void = () => {};
+	export let spellcheckEnabled = true;
 
 	let text = initialState.text;
 	let selectionStart = initialState.selectionStart;
@@ -239,7 +240,7 @@
 		class="editable"
 		class:empty={text.length === 0}
 		contenteditable="true"
-		spellcheck="true"
+		spellcheck={spellcheckEnabled}
 		bind:this={editor}
 		on:beforeinput={onBeforeInput}
 		on:input={onInput}
@@ -272,16 +273,16 @@
 		outline: none;
 		white-space: pre-wrap;
 		word-break: break-word;
-		caret-color: #555;
+		caret-color: var(--editor-caret-color, #555);
 	}
 
 	.editable::selection {
-		background: rgba(180, 213, 255, 0.6);
+		background: var(--editor-selection-color, rgba(180, 213, 255, 0.6));
 	}
 
 	.editable.empty::before {
 		content: 'Start typing...';
-		color: #999;
+		color: var(--editor-placeholder-color, #999);
 		pointer-events: none;
 		position: absolute;
 	}
@@ -303,12 +304,12 @@
 	}
 
 	:global(.editable .line.code) {
-		background: rgba(0, 0, 0, 0.04);
+		background: var(--editor-code-background, rgba(0, 0, 0, 0.04));
 		font-family: 'Roboto Mono', monospace;
 	}
 
 	:global(.editable .line.code.code_fence) {
-		color: #666;
+		color: var(--editor-muted-color, #666);
 	}
 
 	:global(.editable .line.code.code_content) {
@@ -316,7 +317,7 @@
 	}
 
 	:global(.editable .inline-code) {
-		background: rgba(0, 0, 0, 0.04);
+		background: var(--editor-code-background, rgba(0, 0, 0, 0.04));
 		font-family: 'Roboto Mono', monospace;
 		border-radius: 0.2rem;
 		padding: 0 0.15rem;
