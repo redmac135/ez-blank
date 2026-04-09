@@ -12,14 +12,18 @@
 	} from './editor/commands';
 	import { EditorHistory, type EditorState } from './editor/history';
 	import { replaceRange } from './editor/text';
+	import { shouldApplyExternalState } from './editor/state-sync';
 
 	export let initialState: EditorState = { text: '', selectionStart: 0, selectionEnd: 0 };
 	export let onChange: (state: EditorState) => void = () => {};
 
 	let text = initialState.text;
+	let selectionStart = initialState.selectionStart;
+	let selectionEnd = initialState.selectionEnd;
 	let documentModel: EditorDocument = buildDocument('');
 	let editor: HTMLDivElement;
 	let editorHistory: EditorHistory;
+	let mounted = false;
 
 	type EditType = 'typing' | 'deleting' | 'command';
 	let lastEditType: EditType | null = null;
@@ -27,7 +31,7 @@
 	const TYPING_WINDOW = 750;
 	let isApplyingControlledEdit = false;
 
-	function commitText(nextText: string, selectionStart?: number, selectionEnd?: number) {
+	function commitText(nextText: string, nextSelectionStart?: number, nextSelectionEnd?: number) {
 		const previousDocument = documentModel;
 		const nextDocument = buildDocument(nextText);
 
@@ -35,8 +39,10 @@
 		documentModel = nextDocument;
 		syncEditorDom(editor, previousDocument, nextDocument);
 
-		const start = Math.max(0, Math.min(selectionStart ?? 0, nextDocument.text.length));
-		const end = Math.max(0, Math.min(selectionEnd ?? start, nextDocument.text.length));
+		const start = Math.max(0, Math.min(nextSelectionStart ?? 0, nextDocument.text.length));
+		const end = Math.max(0, Math.min(nextSelectionEnd ?? start, nextDocument.text.length));
+		selectionStart = start;
+		selectionEnd = end;
 		restoreTextOffset(editor, documentModel, start, end);
 	}
 
@@ -53,7 +59,9 @@
 		commitText(state.text, state.selectionStart, state.selectionEnd);
 	}
 
-	function emitState(selectionStart: number, selectionEnd: number) {
+	function emitState(nextSelectionStart: number, nextSelectionEnd: number) {
+		selectionStart = Math.max(0, Math.min(nextSelectionStart, text.length));
+		selectionEnd = Math.max(0, Math.min(nextSelectionEnd, text.length));
 		onChange({ text, selectionStart, selectionEnd });
 	}
 
@@ -214,8 +222,16 @@
 
 		editorHistory.push(initialState);
 		applyState(initialState, true);
+		mounted = true;
 		editor.focus();
 	});
+
+	$: if (
+		mounted &&
+		shouldApplyExternalState(initialState, { text, selectionStart, selectionEnd })
+	) {
+		applyState(initialState);
+	}
 </script>
 
 <main class="editor">

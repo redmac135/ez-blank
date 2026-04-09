@@ -1,6 +1,12 @@
 <script lang="ts">
-	import { onMount, tick } from 'svelte';
+	import { onDestroy, onMount, tick } from 'svelte';
 	import Editor from '$lib/Editor.svelte';
+	import FloatingMenu from '$lib/FloatingMenu.svelte';
+	import {
+		applyEditorStateUpdate,
+		applyHydratedSession,
+		applySessionUpdate
+	} from '$lib/editor/app-state';
 	import { type EditorState } from '$lib/editor/history';
 	import { EditorStorage } from '$lib/editor/storage';
 	import {
@@ -20,8 +26,47 @@
 	let deletePageId: string | null = null;
 	let titleDraft = '';
 	let titleInput: HTMLInputElement | null = null;
+	let countButton: HTMLButtonElement | null = null;
+	let countMenuOpen = false;
+	let countDisplayMode: 'words' | 'characters' | 'paragraphs' | 'lines' = 'words';
+	let chromeVisible = true;
+	let previousActiveText = '';
+	let hideChromeTimeout: ReturnType<typeof setTimeout> | null = null;
+
+	const TOP_REVEAL_HEIGHT = 112;
+	const CHROME_HIDE_DELAY = 1400;
 
 	$: activePage = getActivePage(session);
+	$: activeText = activePage.content;
+	$: hasDocumentContent = activeText.length > 0;
+	$: wordCount = getWordCount(activeText);
+	$: characterCount = activeText.length;
+	$: paragraphCount = getParagraphCount(activeText);
+	$: lineCount = getLineCount(activeText);
+	$: countOptions = [
+		{ id: 'words', label: pluralize(wordCount, 'word') },
+		{ id: 'characters', label: pluralize(characterCount, 'character') },
+		{ id: 'paragraphs', label: pluralize(paragraphCount, 'paragraph') },
+		{ id: 'lines', label: pluralize(lineCount, 'line') }
+	] as const;
+	$: currentCountLabel =
+		countOptions.find((option) => option.id === countDisplayMode)?.label ?? countOptions[0].label;
+
+	$: if (!hasDocumentContent || drawerOpen || countMenuOpen) {
+		revealChrome(true);
+	}
+
+	$: if (activeText !== previousActiveText) {
+		const textIsEmpty = activeText.length === 0;
+		previousActiveText = activeText;
+
+		if (textIsEmpty) {
+			revealChrome(true);
+		} else if (!drawerOpen && !countMenuOpen) {
+			chromeVisible = false;
+			clearHideChromeTimeout();
+		}
+	}
 
 	function getActivePage(currentSession: EditorSession): EditorPage {
 		return (
@@ -32,19 +77,19 @@
 	}
 
 	function persistSession(nextSession: EditorSession) {
-		session = nextSession;
-		if (loaded) {
-			EditorStorage.save(nextSession);
+		const transition = applySessionUpdate({ session, loaded }, nextSession);
+		session = transition.state.session;
+		if (transition.persistedSession) {
+			EditorStorage.save(transition.persistedSession);
 		}
 	}
 
 	function updateActivePage(state: EditorState) {
-		persistSession({
-			...session,
-			pages: session.pages.map((page) =>
-				page.id === session.activePageId ? updatePageState(page, state) : page
-			)
-		});
+		const transition = applyEditorStateUpdate({ session, loaded }, state);
+		session = transition.state.session;
+		if (transition.persistedSession) {
+			EditorStorage.save(transition.persistedSession);
+		}
 	}
 
 	function selectPage(pageId: string) {
@@ -144,9 +189,113 @@
 		session = EditorStorage.load();
 	}
 
+	function getWordCount(value: string) {
+		const trimmed = value.trim();
+		return trimmed ? trimmed.split(/\s+/).length : 0;
+	}
+
+	function pluralize(count: number, label: string) {
+		return `${count} ${label}${count === 1 ? '' : 's'}`;
+	}
+
+	function getParagraphCount(value: string) {
+		const trimmed = value.trim();
+		if (!trimmed) return 0;
+		return trimmed.split(/\n\s*\n+/).filter(Boolean).length;
+	}
+
+	function getLineCount(value: string) {
+		if (!value) return 0;
+		return value.split('\n').length;
+	}
+
+	function clearHideChromeTimeout() {
+		if (hideChromeTimeout) {
+			clearTimeout(hideChromeTimeout);
+			hideChromeTimeout = null;
+		}
+	}
+
+	function scheduleChromeHide() {
+		clearHideChromeTimeout();
+		if (!hasDocumentContent || drawerOpen || countMenuOpen) return;
+
+		hideChromeTimeout = setTimeout(() => {
+			chromeVisible = false;
+			hideChromeTimeout = null;
+		}, CHROME_HIDE_DELAY);
+	}
+
+	function revealChrome(persist = false) {
+		chromeVisible = true;
+		if (persist) {
+			clearHideChromeTimeout();
+			return;
+		}
+
+		scheduleChromeHide();
+	}
+
+	function toggleCountMenu() {
+		countMenuOpen = !countMenuOpen;
+		if (countMenuOpen) {
+			revealChrome(true);
+			return;
+		}
+
+		scheduleChromeHide();
+	}
+
+	function selectCountDisplay(
+		nextMode: 'words' | 'characters' | 'paragraphs' | 'lines'
+	) {
+		countDisplayMode = nextMode;
+		countMenuOpen = false;
+		scheduleChromeHide();
+	}
+
+	function handleMouseMove(event: MouseEvent) {
+		if (event.clientY <= TOP_REVEAL_HEIGHT) {
+			revealChrome();
+		}
+	}
+
+	function handleWindowPointerDown(event: MouseEvent) {
+		const target = event.target;
+		if (!(target instanceof Node) || !countMenuOpen) return;
+		if (
+			countButton?.contains(target) ||
+			(target instanceof Element && target.closest('.count-control'))
+		) {
+			return;
+		}
+		countMenuOpen = false;
+		scheduleChromeHide();
+	}
+
+	function handleWindowKeydown(event: KeyboardEvent) {
+		if (event.key !== 'Escape') return;
+
+		if (countMenuOpen) {
+			countMenuOpen = false;
+			scheduleChromeHide();
+		}
+
+		if (drawerOpen) {
+			drawerOpen = false;
+			menuPageId = null;
+		}
+	}
+
 	onMount(() => {
-		session = EditorStorage.load();
-		loaded = true;
+		const hydratedState = applyHydratedSession({ session, loaded }, EditorStorage.load());
+		session = hydratedState.session;
+		loaded = hydratedState.loaded;
+		previousActiveText = getActivePage(session).content;
+	});
+
+	onDestroy(() => {
+		clearHideChromeTimeout();
 	});
 
 	$: deletePage = deletePageId
@@ -154,123 +303,165 @@
 		: null;
 </script>
 
-<svelte:window on:beforeunload={() => EditorStorage.save(session)} on:storage={handleStorage} />
+<svelte:window
+	on:beforeunload={() => EditorStorage.save(session)}
+	on:storage={handleStorage}
+	on:mousemove={handleMouseMove}
+	on:mousedown={handleWindowPointerDown}
+	on:keydown={handleWindowKeydown}
+/>
 
-<button
-	class="drawer-toggle"
-	type="button"
-	aria-label={drawerOpen ? 'Close pages' : 'Open pages'}
-	aria-expanded={drawerOpen}
-	on:click={() => (drawerOpen = !drawerOpen)}
->
-	<span></span>
-	<span></span>
-</button>
-
-{#if drawerOpen}
-	<button
-		class="scrim"
-		type="button"
-		aria-label="Close pages"
-		on:click={() => {
-			drawerOpen = false;
-			menuPageId = null;
-		}}
-	></button>
-{/if}
-
-{#if deletePage}
-	<button class="modal-scrim" type="button" aria-label="Close delete dialog" on:click={closeDeleteModal}></button>
-	<div class="modal" role="dialog" aria-modal="true" aria-labelledby="delete-title">
-		<h2 id="delete-title">Delete page?</h2>
-		<p>{deletePage.title}</p>
-		<div class="modal-actions">
-			<button type="button" class="modal-button" on:click={closeDeleteModal}>Cancel</button>
-			<button type="button" class="modal-button modal-button-delete" on:click={() => closePage(deletePage.id)}>
-				Delete
+<div class="page-shell">
+	<div class:visible={loaded && chromeVisible} class="top-bar-shell">
+		<div class="top-bar">
+			<button
+				class="drawer-toggle"
+				type="button"
+				aria-label={drawerOpen ? 'Close pages' : 'Open pages'}
+				aria-expanded={drawerOpen}
+				on:click={() => (drawerOpen = !drawerOpen)}
+			>
+				<span></span>
+				<span></span>
 			</button>
+
+			<div class="count-control">
+				<button
+					bind:this={countButton}
+					class="count-toggle"
+					type="button"
+					aria-haspopup="menu"
+					aria-expanded={countMenuOpen}
+					aria-label={`Open count menu, currently showing ${currentCountLabel}`}
+					on:click={toggleCountMenu}
+				>
+					{currentCountLabel}
+				</button>
+				{#if countMenuOpen}
+					<FloatingMenu label="Count display options" verticalOffset="0.45rem">
+						{#each countOptions as option}
+							<button
+								type="button"
+								role="menuitemradio"
+								aria-checked={option.id === countDisplayMode}
+								on:click={() => selectCountDisplay(option.id)}
+							>
+								{option.label}
+							</button>
+						{/each}
+					</FloatingMenu>
+				{/if}
+			</div>
 		</div>
 	</div>
-{/if}
 
-<aside class:open={drawerOpen} class="drawer" aria-label="Pages">
-	<div class="drawer-header">
-		<h1>Pages</h1>
-		<button type="button" class="add-page" aria-label="New page" on:click={addPage}>+</button>
-	</div>
+	{#if drawerOpen}
+		<button
+			class="scrim"
+			type="button"
+			aria-label="Close pages"
+			on:click={() => {
+				drawerOpen = false;
+				menuPageId = null;
+			}}
+		></button>
+	{/if}
 
-	<nav class="page-list" aria-label="Page tabs">
-		{#each session.pages as page (page.id)}
-			<div class:active={page.id === session.activePageId} class="page-row">
-				{#if editingPageId === page.id}
-					<div class="page-tab page-tab-editing">
-						<input
-							bind:this={titleInput}
-							bind:value={titleDraft}
-							class="title-input"
-							type="text"
-							aria-label="Edit page title"
-							on:keydown={(event) => {
-								if (event.key === 'Enter') {
-									event.preventDefault();
-									confirmTitleEdit();
-								}
-								if (event.key === 'Escape') {
-									event.preventDefault();
-									cancelTitleEdit();
-								}
-							}}
-						/>
+	{#if deletePage}
+		<button class="modal-scrim" type="button" aria-label="Close delete dialog" on:click={closeDeleteModal}></button>
+		<div class="modal" role="dialog" aria-modal="true" aria-labelledby="delete-title">
+			<h2 id="delete-title">Delete page?</h2>
+			<p>{deletePage.title}</p>
+			<div class="modal-actions">
+				<button type="button" class="modal-button" on:click={closeDeleteModal}>Cancel</button>
+				<button type="button" class="modal-button modal-button-delete" on:click={() => closePage(deletePage.id)}>
+					Delete
+				</button>
+			</div>
+		</div>
+	{/if}
+
+	<aside class:open={drawerOpen} class="drawer" aria-label="Pages">
+		<div class="drawer-header">
+			<h1>Pages</h1>
+			<button type="button" class="add-page" aria-label="New page" on:click={addPage}>+</button>
+		</div>
+
+		<nav class="page-list" aria-label="Page tabs">
+			{#each session.pages as page (page.id)}
+				<div class:active={page.id === session.activePageId} class="page-row">
+					{#if editingPageId === page.id}
+						<div class="page-tab page-tab-editing">
+							<input
+								bind:this={titleInput}
+								bind:value={titleDraft}
+								class="title-input"
+								type="text"
+								aria-label="Edit page title"
+								on:keydown={(event) => {
+									if (event.key === 'Enter') {
+										event.preventDefault();
+										confirmTitleEdit();
+									}
+									if (event.key === 'Escape') {
+										event.preventDefault();
+										cancelTitleEdit();
+									}
+								}}
+							/>
+							<button
+								type="button"
+								class="confirm-title"
+								aria-label="Confirm title"
+								on:click={confirmTitleEdit}
+							>
+								✓
+							</button>
+						</div>
+					{:else}
+						<button type="button" class="page-tab" on:click={() => selectPage(page.id)}>
+							<span class="page-title">{page.title}</span>
+						</button>
+					{/if}
+					<div class="page-actions">
 						<button
 							type="button"
-							class="confirm-title"
-							aria-label="Confirm title"
-							on:click={confirmTitleEdit}
+							class="menu-toggle"
+							aria-label={`Page menu for ${page.title}`}
+							aria-expanded={menuPageId === page.id}
+							on:click={() => toggleMenu(page.id)}
 						>
-							✓
+							<span></span>
+							<span></span>
+							<span></span>
 						</button>
+						{#if menuPageId === page.id}
+							<FloatingMenu label={`Page menu for ${page.title}`}>
+								<button type="button" on:click={() => startEditingTitle(page.id)}>Edit title</button>
+								<button type="button" on:click={() => openDeleteModal(page.id)}>Delete</button>
+							</FloatingMenu>
+						{/if}
 					</div>
-				{:else}
-					<button type="button" class="page-tab" on:click={() => selectPage(page.id)}>
-						<span class="page-title">{page.title}</span>
-					</button>
-				{/if}
-				<div class="page-actions">
-					<button
-						type="button"
-						class="menu-toggle"
-						aria-label={`Page menu for ${page.title}`}
-						aria-expanded={menuPageId === page.id}
-						on:click={() => toggleMenu(page.id)}
-					>
-						<span></span>
-						<span></span>
-						<span></span>
-					</button>
-					{#if menuPageId === page.id}
-						<div class="page-menu">
-							<button type="button" on:click={() => startEditingTitle(page.id)}>Edit title</button>
-							<button type="button" on:click={() => openDeleteModal(page.id)}>Delete</button>
-						</div>
-					{/if}
 				</div>
-			</div>
-		{/each}
-	</nav>
-</aside>
+			{/each}
+		</nav>
+	</aside>
 
-<section class="workspace">
-	{#key activePage.id}
-		<Editor
-			initialState={{
-				text: activePage.content,
-				selectionStart: activePage.selectionStart,
-				selectionEnd: activePage.selectionEnd
-			}}
-			onChange={updateActivePage}
-		/>
-	{/key}
-</section>
+	<section class="workspace">
+		{#if loaded}
+			{#key activePage.id}
+				<Editor
+					initialState={{
+						text: activePage.content,
+						selectionStart: activePage.selectionStart,
+						selectionEnd: activePage.selectionEnd
+					}}
+					onChange={updateActivePage}
+				/>
+			{/key}
+		{/if}
+	</section>
+</div>
 
 <style>
 	:global(body) {
@@ -280,21 +471,95 @@
 		font-family: 'Roboto Mono', monospace;
 	}
 
-	.drawer-toggle {
-		position: fixed;
-		top: 1.2rem;
-		left: 1.2rem;
+	.page-shell {
+		position: relative;
+		min-height: 100vh;
+	}
+
+	.top-bar-shell {
+		position: absolute;
+		top: 0;
+		left: 0;
+		right: 0;
 		z-index: 20;
+		padding:
+			max(0.75rem, env(safe-area-inset-top))
+			max(0.75rem, env(safe-area-inset-right))
+			0
+			max(0.75rem, env(safe-area-inset-left));
+		opacity: 0;
+		transform: translateY(-0.4rem);
+		pointer-events: none;
+		transition:
+			opacity 180ms ease,
+			transform 180ms ease;
+	}
+
+	.top-bar-shell.visible {
+		opacity: 1;
+		transform: translateY(0);
+		pointer-events: auto;
+	}
+
+	.top-bar {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		width: 100%;
+		box-sizing: border-box;
+	}
+
+	.count-control {
+		position: relative;
+		min-width: 0;
+	}
+
+	.count-toggle,
+	.drawer-toggle {
+		position: static;
+		border: 0;
+		background: transparent;
+		color: inherit;
+		cursor: pointer;
+	}
+
+	.count-toggle {
+		display: block;
+		min-height: 2rem;
+		max-width: min(12rem, calc(100vw - 6rem));
+		padding: 0.45rem 0.75rem;
+		border-radius: 999px;
+		font: inherit;
+		font-size: 0.75rem;
+		letter-spacing: 0.02em;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.count-control :global(.floating-menu) {
+		min-width: max-content;
+	}
+
+	.count-control :global(.floating-menu button),
+	.count-control :global(.floating-menu .menu-stat) {
+		text-align: right;
+	}
+
+	.count-control :global(.floating-menu button[aria-checked='true']) {
+		color: rgba(0, 0, 0, 0.5);
+	}
+
+	.drawer-toggle {
 		width: 2rem;
 		height: 2rem;
 		padding: 0;
-		border: 0;
-		background: transparent;
+		border-radius: 999px;
 		display: inline-flex;
 		flex-direction: column;
+		align-items: center;
 		justify-content: center;
 		gap: 0.28rem;
-		cursor: pointer;
 	}
 
 	.drawer-toggle span {
@@ -416,7 +681,6 @@
 	.add-page,
 	.page-tab,
 	.menu-toggle,
-	.page-menu button,
 	.confirm-title {
 		border: 0;
 		background: transparent;
@@ -504,31 +768,6 @@
 		pointer-events: none;
 	}
 
-	.page-menu {
-		position: absolute;
-		top: calc(100% + 0.2rem);
-		right: 0;
-		z-index: 2;
-		min-width: 8.5rem;
-		padding: 0.25rem;
-		background: #fff;
-		border: 1px solid rgba(0, 0, 0, 0.08);
-		border-radius: 0.45rem;
-		box-shadow: 0 12px 30px rgba(0, 0, 0, 0.06);
-		display: flex;
-		flex-direction: column;
-	}
-
-	.page-menu button {
-		padding: 0.55rem 0.65rem;
-		text-align: left;
-		border-radius: 0.3rem;
-	}
-
-	.page-menu button:hover {
-		background: rgba(0, 0, 0, 0.035);
-	}
-
 	.title-input {
 		width: 100%;
 		min-width: 0;
@@ -553,5 +792,21 @@
 		width: 100%;
 		min-height: 100vh;
 		background: #fff;
+	}
+
+	@media (max-width: 767px) {
+		.top-bar-shell {
+			padding:
+				max(0.6rem, env(safe-area-inset-top))
+				max(0.6rem, env(safe-area-inset-right))
+				0
+				max(0.6rem, env(safe-area-inset-left));
+		}
+
+		.count-toggle {
+			max-width: calc(100vw - 5rem);
+			padding-inline: 0.65rem;
+			font-size: 0.72rem;
+		}
 	}
 </style>
