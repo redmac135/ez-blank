@@ -612,6 +612,7 @@
 		--page-background: #fff;
 		--text-color: #111;
 		--muted-text-color: rgba(0, 0, 0, 0.68);
+		--subtle-text-color: rgba(0, 0, 0, 0.5);
 		--surface-color: rgba(255, 255, 255, 0.94);
 		--surface-border-color: rgba(0, 0, 0, 0.08);
 		--surface-shadow-color: rgba(0, 0, 0, 0.06);
@@ -638,6 +639,7 @@
 		--page-background: #121314;
 		--text-color: #f1f1ec;
 		--muted-text-color: rgba(241, 241, 236, 0.7);
+		--subtle-text-color: rgba(241, 241, 236, 0.62);
 		--surface-color: rgba(26, 28, 30, 0.94);
 		--surface-border-color: rgba(255, 255, 255, 0.12);
 		--surface-shadow-color: rgba(0, 0, 0, 0.34);
@@ -756,7 +758,7 @@
 	}
 
 	.count-control :global(.floating-menu button[aria-checked='true']) {
-		color: rgba(0, 0, 0, 0.5);
+		color: var(--subtle-text-color);
 	}
 
 	.drawer-toggle {
@@ -885,7 +887,7 @@
 		top: 0;
 		left: 0;
 		bottom: 0;
-		z-index: 15;
+		z-index: 25;
 		width: min(18rem, 82vw);
 		padding: 4.25rem 1rem 1rem;
 		box-sizing: border-box;
