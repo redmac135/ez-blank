@@ -79,6 +79,10 @@ export function getCurrentLineBounds(text: string, position: number) {
 
 export function getSelectedBlockBounds(text: string, selection: SelectionRange) {
 	const blockStart = getCurrentLineBounds(text, selection.start).lineStart;
-	const blockEnd = getCurrentLineBounds(text, selection.end).lineEnd;
+	const blockEndPosition =
+		selection.start !== selection.end && selection.end > 0 && text[selection.end - 1] === '\n'
+			? selection.end - 1
+			: selection.end;
+	const blockEnd = getCurrentLineBounds(text, blockEndPosition).lineEnd;
 	return { blockStart, blockEnd };
 }

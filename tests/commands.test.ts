@@ -30,6 +30,30 @@ test('applyTabKey renumbers following siblings when indenting a single ordered i
 	assert.equal(change.selectionEnd, cursor + 4);
 });
 
+test('applyTabKey renumbers the parent ordered list after indenting nested rows', () => {
+	const source = '1. outer\n    1. a\n    2. b\n    3. c\n    4. d';
+	const start = source.indexOf('    2. b');
+	const end = source.indexOf('    3. c') + '    3. c'.length;
+
+	const change = applyTabKey(source, { start, end }, false);
+
+	assert.equal(change.text, '1. outer\n    1. a\n        1. b\n        2. c\n    2. d');
+	assert.equal(change.selectionStart, start);
+	assert.equal(change.selectionEnd, end + 8);
+});
+
+test('applyTabKey treats selection ends at the next line start as end-exclusive', () => {
+	const source = '1. outer\n    1. a\n    2. b\n    3. c';
+	const start = source.indexOf('    1. a');
+	const end = source.indexOf('    3. c');
+
+	const change = applyTabKey(source, { start, end }, false);
+
+	assert.equal(change.text, '1. outer\n        1. a\n        2. b\n    1. c');
+	assert.equal(change.selectionStart, start);
+	assert.equal(change.selectionEnd, end + 7);
+});
+
 test('applyEnterKey inserts a list item and renumbers later ordered siblings', () => {
 	const source = '1. one\n2. two\n3. three';
 	const cursor = source.indexOf('2. two') + '2. two'.length;

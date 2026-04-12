@@ -100,15 +100,34 @@ function collectOrderedListReplacements(
 	blocks: BlockNode[],
 	affectedRange: SelectionRange,
 	replacements: TextReplacement[]
-) {
+): boolean {
+	let foundAffectedBlock = false;
+
 	for (const block of blocks) {
+		let blockAffected = rangesIntersect(block.range, affectedRange);
+
 		if (block.type === 'list') {
 			collectListReplacements(block, affectedRange, replacements);
+
 			for (const item of block.items) {
-				collectOrderedListReplacements(item.children, affectedRange, replacements);
+				const childrenAffected = collectOrderedListReplacements(
+					item.children,
+					affectedRange,
+					replacements
+				);
+				if (childrenAffected) {
+					normalizeSiblingOrderedChildLists(item.children, affectedRange, replacements);
+					blockAffected = true;
+				}
 			}
 		}
+
+		if (blockAffected) {
+			foundAffectedBlock = true;
+		}
 	}
+
+	return foundAffectedBlock;
 }
 
 function collectListReplacements(
@@ -130,6 +149,20 @@ function collectListReplacements(
 			end: item.lineRange.start + item.prefix.length,
 			text: `${'    '.repeat(item.level - 1)}${expectedNumber}. `
 		});
+	}
+}
+
+function normalizeSiblingOrderedChildLists(
+	blocks: BlockNode[],
+	affectedRange: SelectionRange,
+	replacements: TextReplacement[]
+) {
+	for (const block of blocks) {
+		if (block.type !== 'list' || !block.ordered || rangesIntersect(block.range, affectedRange)) {
+			continue;
+		}
+
+		collectListReplacements(block, block.range, replacements);
 	}
 }
 
