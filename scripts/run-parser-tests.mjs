@@ -39,8 +39,8 @@ await new Promise((resolvePromise, rejectPromise) => {
 		process.execPath,
 		['--test', ...testEntries.map((testEntry) => testEntry.outfile)],
 		{
-		cwd: root,
-		stdio: 'inherit'
+			cwd: root,
+			stdio: 'inherit'
 		}
 	);
 

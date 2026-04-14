@@ -36,11 +36,10 @@ export function applyEnterKey(text: string, selection: SelectionRange): TextChan
 
 	if (metadata.ordered && lineText.trim().match(/^\d+\.$/)) {
 		const nextText = text.slice(0, lineStart) + text.slice(lineEnd);
-		return normalizeListEdit(
-			nextText,
-			getSplitListAffectedRange(nextText, lineStart),
-			{ start: lineStart, end: lineStart }
-		);
+		return normalizeListEdit(nextText, getSplitListAffectedRange(nextText, lineStart), {
+			start: lineStart,
+			end: lineStart
+		});
 	}
 
 	if (!metadata.ordered && lineText.trim() === '-') {
@@ -152,11 +151,7 @@ function applyTabToLine(text: string, position: number, shiftKey: boolean): Text
 	};
 }
 
-function normalizeListEdit(
-	text: string,
-	affectedRange: SelectionRange,
-	selection: SelectionRange
-) {
+function normalizeListEdit(text: string, affectedRange: SelectionRange, selection: SelectionRange) {
 	return normalizeOrderedListNumbers(text, affectedRange, selection);
 }
 

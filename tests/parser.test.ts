@@ -71,8 +71,14 @@ test('strong and strong emphasis require non-empty content', () => {
 	const doubleMarker = getOnlyLine('****').line;
 	const tripleMarker = getOnlyLine('******').line;
 
-	assert.equal(renderEditorLine(doubleMarker), '<div class="line" data-line-id="line-0">****</div>');
-	assert.equal(renderEditorLine(tripleMarker), '<div class="line" data-line-id="line-0">******</div>');
+	assert.equal(
+		renderEditorLine(doubleMarker),
+		'<div class="line" data-line-id="line-0">****</div>'
+	);
+	assert.equal(
+		renderEditorLine(tripleMarker),
+		'<div class="line" data-line-id="line-0">******</div>'
+	);
 });
 
 test('valid emphasis still renders syntax markers and semantic tags', () => {
@@ -137,8 +143,14 @@ test('formatting markers with leading or trailing spaces are treated as plain te
 	const leadingSpace = getOnlyLine('* text*').line;
 	const trailingSpace = getOnlyLine('*text *').line;
 
-	assert.equal(renderEditorLine(leadingSpace), '<div class="line" data-line-id="line-0">* text*</div>');
-	assert.equal(renderEditorLine(trailingSpace), '<div class="line" data-line-id="line-0">*text *</div>');
+	assert.equal(
+		renderEditorLine(leadingSpace),
+		'<div class="line" data-line-id="line-0">* text*</div>'
+	);
+	assert.equal(
+		renderEditorLine(trailingSpace),
+		'<div class="line" data-line-id="line-0">*text *</div>'
+	);
 });
 
 test('heading blocks track level and render with heading class', () => {

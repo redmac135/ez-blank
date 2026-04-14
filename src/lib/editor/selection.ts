@@ -41,7 +41,10 @@ export function extractText(editor: HTMLDivElement): string {
 	return lines.map((line) => line.textContent ?? '').join('\n');
 }
 
-export function getEditorContainerOffset(documentModel: EditorDocument, childOffset: number): number {
+export function getEditorContainerOffset(
+	documentModel: EditorDocument,
+	childOffset: number
+): number {
 	if (childOffset <= 0 || documentModel.lines.length === 0) {
 		return 0;
 	}

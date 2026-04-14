@@ -45,7 +45,10 @@ test('hydration after a pre-load empty editor update restores the stored content
 		selectionStart: 0,
 		selectionEnd: 0
 	});
-	const hydrated = applyHydratedSession(preHydrationEdit.state, createLoadedSession('latest content'));
+	const hydrated = applyHydratedSession(
+		preHydrationEdit.state,
+		createLoadedSession('latest content')
+	);
 
 	assert.equal(hydrated.loaded, true);
 	assert.equal(hydrated.session.pages[0]?.content, 'latest content');

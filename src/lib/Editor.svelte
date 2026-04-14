@@ -269,6 +269,7 @@
 
 	.editable {
 		width: 100%;
+		box-sizing: border-box;
 		padding: 4rem 1.5rem;
 		outline: none;
 		white-space: pre-wrap;

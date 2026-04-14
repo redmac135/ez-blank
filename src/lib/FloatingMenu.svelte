@@ -3,7 +3,12 @@
 	export let verticalOffset = '0.2rem';
 </script>
 
-<div class="floating-menu" role="menu" aria-label={label} style={`top: calc(100% + ${verticalOffset})`}>
+<div
+	class="floating-menu"
+	role="menu"
+	aria-label={label}
+	style={`top: calc(100% + ${verticalOffset})`}
+>
 	<slot />
 </div>
 

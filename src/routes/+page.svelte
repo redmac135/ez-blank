@@ -1,29 +1,39 @@
 <script lang="ts">
+	import type { User } from '@supabase/supabase-js';
 	import { onDestroy, onMount, tick } from 'svelte';
 	import Editor from '$lib/Editor.svelte';
 	import FloatingMenu from '$lib/FloatingMenu.svelte';
+	import Icon from '$lib/Icon.svelte';
+	import Modal from '$lib/Modal.svelte';
 	import {
 		applyEditorStateUpdate,
 		applyHydratedSession,
 		applySessionUpdate
 	} from '$lib/editor/app-state';
 	import {
+		applyPageIdMap,
+		buildSessionFromRemote,
+		hasRemoteContent,
+		hasSessionContent,
+		readRemoteSession,
+		saveRemoteSession
+	} from '$lib/editor/remote-session';
+	import {
 		cycleCountVisibility,
 		DEFAULT_PREFERENCES,
 		getCountVisibilityLabel,
 		normalizePreferences,
-		type CountVisibility,
 		type EditorPreferences,
 		type ThemeMode
 	} from '$lib/editor/preferences';
 	import { type EditorState } from '$lib/editor/history';
 	import { EditorStorage } from '$lib/editor/storage';
+	import { supabase } from '$lib/supabaseClient';
 	import {
 		createPage,
 		createSession,
 		type EditorPage,
 		type EditorSession,
-		updatePageState,
 		updatePageTitle
 	} from '$lib/editor/session';
 
@@ -34,19 +44,33 @@
 	let editingPageId: string | null = null;
 	let deletePageId: string | null = null;
 	let titleDraft = '';
+	let emailDraft = '';
 	let titleInput: HTMLInputElement | null = null;
 	let countButton: HTMLButtonElement | null = null;
 	let settingsButton: HTMLButtonElement | null = null;
 	let countMenuOpen = false;
 	let settingsMenuOpen = false;
+	let loginModalOpen = false;
+	let importPromptOpen = false;
 	let countDisplayMode: 'words' | 'characters' | 'paragraphs' | 'lines' = 'words';
 	let chromeVisible = true;
 	let previousActiveText = '';
 	let hideChromeTimeout: ReturnType<typeof setTimeout> | null = null;
+	let remoteSyncTimeout: ReturnType<typeof setTimeout> | null = null;
 	let preferences: EditorPreferences = DEFAULT_PREFERENCES;
+	let authUser: User | null = null;
+	let authBusy = false;
+	let authMessage = '';
+	let loginSubmitting = false;
+	let syncBusy = false;
+	let syncQueued = false;
+	let pendingAnonymousImportSession: EditorSession | null = null;
+	let currentAuthRequestId = 0;
+	let authSubscription: { unsubscribe: () => void } | null = null;
 
 	const TOP_REVEAL_HEIGHT = 112;
 	const CHROME_HIDE_DELAY = 1400;
+	const REMOTE_SYNC_DEBOUNCE_MS = 800;
 	const PREFERENCES_KEY = 'ez-blank-preferences-v1';
 
 	$: activePage = getActivePage(session);
@@ -69,9 +93,13 @@
 	$: countVisible = countVisibleInChrome && (chromeVisible || countPinnedVisible || countMenuOpen);
 	$: countDockedRight = countPinnedVisible && !chromeVisible && !settingsMenuOpen;
 	$: pageTheme = preferences.themeMode;
+	$: deletePage = deletePageId
+		? (session.pages.find((page) => page.id === deletePageId) ?? null)
+		: null;
 
 	$: if (!hasDocumentContent || drawerOpen || countMenuOpen || settingsMenuOpen) {
-		revealChrome(true);
+		chromeVisible = true;
+		clearHideChromeTimeout();
 	}
 
 	$: if (activeText !== previousActiveText) {
@@ -79,11 +107,16 @@
 		previousActiveText = activeText;
 
 		if (textIsEmpty) {
-			revealChrome(true);
+			chromeVisible = true;
+			clearHideChromeTimeout();
 		} else if (!drawerOpen && !countMenuOpen) {
 			chromeVisible = false;
 			clearHideChromeTimeout();
 		}
+	}
+
+	$: if (loaded) {
+		applyTheme(pageTheme);
 	}
 
 	function getActivePage(currentSession: EditorSession): EditorPage {
@@ -98,7 +131,23 @@
 		const transition = applySessionUpdate({ session, loaded }, nextSession);
 		session = transition.state.session;
 		if (transition.persistedSession) {
-			EditorStorage.save(transition.persistedSession);
+			persistWorkspaceState(transition.persistedSession, authUser ? { dirty: true } : undefined);
+		}
+		if (authUser) {
+			scheduleRemoteSync();
+		}
+	}
+
+	function replaceLocalSession(
+		nextSession: EditorSession,
+		options: { persist?: boolean; dirty?: boolean; lastSyncedAt?: string | null } = {}
+	) {
+		session = nextSession;
+		if (loaded && options.persist) {
+			persistWorkspaceState(nextSession, {
+				dirty: options.dirty,
+				lastSyncedAt: options.lastSyncedAt
+			});
 		}
 	}
 
@@ -106,7 +155,10 @@
 		const transition = applyEditorStateUpdate({ session, loaded }, state);
 		session = transition.state.session;
 		if (transition.persistedSession) {
-			EditorStorage.save(transition.persistedSession);
+			persistWorkspaceState(transition.persistedSession, authUser ? { dirty: true } : undefined);
+		}
+		if (authUser) {
+			scheduleRemoteSync();
 		}
 	}
 
@@ -143,7 +195,9 @@
 
 		const nextPages = session.pages.filter((page) => page.id !== pageId);
 		const nextActivePageId =
-			session.activePageId === pageId ? (nextPages[0]?.id ?? session.activePageId) : session.activePageId;
+			session.activePageId === pageId
+				? (nextPages[0]?.id ?? session.activePageId)
+				: session.activePageId;
 
 		persistSession({
 			pages: nextPages,
@@ -196,14 +250,105 @@
 		deletePageId = null;
 	}
 
+	function closeLoginModal() {
+		if (loginSubmitting) return;
+		loginModalOpen = false;
+		authMessage = '';
+	}
+
+	async function submitLogin() {
+		if (!supabase) {
+			authMessage = 'Supabase is not configured yet.';
+			return;
+		}
+
+		const email = emailDraft.trim();
+		if (!email) {
+			authMessage = 'Enter an email address.';
+			return;
+		}
+
+		loginSubmitting = true;
+		authMessage = '';
+
+		const { error } = await supabase.auth.signInWithOtp({
+			email,
+			options: {
+				emailRedirectTo: window.location.href
+			}
+		});
+
+		loginSubmitting = false;
+
+		if (error) {
+			authMessage = error.message;
+			return;
+		}
+
+		authMessage = 'Check your email for the login link.';
+	}
+
+	async function logout() {
+		if (!supabase || authBusy) return;
+
+		authBusy = true;
+		authMessage = '';
+		clearRemoteSyncTimeout();
+
+		const { error } = await supabase.auth.signOut();
+
+		authBusy = false;
+
+		if (error) {
+			authMessage = error.message;
+			return;
+		}
+
+		settingsMenuOpen = false;
+	}
+
+	function resolveAnonymousImport(addAnonymousToAccount: boolean) {
+		if (authUser && pendingAnonymousImportSession) {
+			EditorStorage.markPromptedUserId(authUser.id);
+		}
+
+		if (addAnonymousToAccount && pendingAnonymousImportSession) {
+			const nextSession: EditorSession = {
+				pages: [...session.pages, ...pendingAnonymousImportSession.pages],
+				activePageId: session.activePageId
+			};
+
+			replaceLocalSession(nextSession, {
+				persist: true,
+				dirty: true,
+				lastSyncedAt: null
+			});
+			scheduleRemoteSync();
+		}
+
+		pendingAnonymousImportSession = null;
+		importPromptOpen = false;
+		loginModalOpen = false;
+	}
+
 	function handleStorage(event: StorageEvent) {
 		if (event.key === PREFERENCES_KEY) {
 			preferences = loadPreferences();
 			return;
 		}
 
-		if (event.key === EditorStorage.STORAGE_KEY || event.key === EditorStorage.LEGACY_STORAGE_KEY) {
-			session = EditorStorage.load();
+		if (authUser) {
+			if (event.key === EditorStorage.getUserStateKey(authUser.id)) {
+				const userSession = EditorStorage.loadUserState(authUser.id);
+				if (userSession) {
+					session = userSession;
+				}
+			}
+			return;
+		}
+
+		if (event.key === EditorStorage.getAnonymousStateKey()) {
+			session = EditorStorage.loadAnonymousState();
 		}
 	}
 
@@ -225,6 +370,80 @@
 	function getLineCount(value: string) {
 		if (!value) return 0;
 		return value.split('\n').length;
+	}
+
+	function clearRemoteSyncTimeout() {
+		if (remoteSyncTimeout) {
+			clearTimeout(remoteSyncTimeout);
+			remoteSyncTimeout = null;
+		}
+	}
+
+	function scheduleRemoteSync() {
+		if (!canSyncRemotely()) return;
+
+		if (syncBusy) {
+			syncQueued = true;
+			return;
+		}
+
+		clearRemoteSyncTimeout();
+		remoteSyncTimeout = setTimeout(() => {
+			void flushRemoteSync();
+		}, REMOTE_SYNC_DEBOUNCE_MS);
+	}
+
+	function canSyncRemotely() {
+		return loaded && !!supabase && !!authUser && !importPromptOpen;
+	}
+
+	async function flushRemoteSync() {
+		if (!supabase || !authUser || !loaded) return;
+
+		clearRemoteSyncTimeout();
+		syncBusy = true;
+		authMessage = '';
+		const saveUserId = authUser.id;
+		const snapshot = session;
+		const syncedAt = new Date().toISOString();
+
+		try {
+			const result = await saveRemoteSession(supabase, saveUserId, snapshot);
+
+			if (authUser?.id !== saveUserId) {
+				return;
+			}
+
+			if (result.pageIdMap.size > 0) {
+				const remote = await readRemoteSession(supabase, saveUserId);
+				if (authUser?.id !== saveUserId) {
+					return;
+				}
+				replaceLocalSession(buildSessionFromRemote(remote), {
+					persist: true,
+					dirty: false,
+					lastSyncedAt: syncedAt
+				});
+			} else {
+				replaceLocalSession(
+					applyPageIdMap(session, result.pageIdMap, result.activePageId ?? session.activePageId),
+					{
+						persist: true,
+						dirty: false,
+						lastSyncedAt: syncedAt
+					}
+				);
+			}
+		} catch (error) {
+			authMessage = getErrorMessage(error, 'Unable to sync changes.');
+		} finally {
+			syncBusy = false;
+
+			if (syncQueued && authUser?.id === saveUserId) {
+				syncQueued = false;
+				scheduleRemoteSync();
+			}
+		}
 	}
 
 	function clearHideChromeTimeout() {
@@ -265,9 +484,7 @@
 		scheduleChromeHide();
 	}
 
-	function selectCountDisplay(
-		nextMode: 'words' | 'characters' | 'paragraphs' | 'lines'
-	) {
+	function selectCountDisplay(nextMode: 'words' | 'characters' | 'paragraphs' | 'lines') {
 		countDisplayMode = nextMode;
 		countMenuOpen = false;
 		scheduleChromeHide();
@@ -363,25 +580,23 @@
 	}
 
 	onMount(() => {
-		const hydratedState = applyHydratedSession({ session, loaded }, EditorStorage.load());
+		const hydratedState = applyHydratedSession(
+			{ session, loaded },
+			EditorStorage.loadAnonymousState()
+		);
 		session = hydratedState.session;
 		loaded = hydratedState.loaded;
 		preferences = loadPreferences();
 		previousActiveText = getActivePage(session).content;
 		applyTheme(preferences.themeMode);
+		void initializeAuth();
 	});
 
 	onDestroy(() => {
 		clearHideChromeTimeout();
+		clearRemoteSyncTimeout();
+		authSubscription?.unsubscribe();
 	});
-
-	$: if (loaded) {
-		applyTheme(pageTheme);
-	}
-
-	$: deletePage = deletePageId
-		? session.pages.find((page) => page.id === deletePageId) ?? null
-		: null;
 
 	function loadPreferences(): EditorPreferences {
 		try {
@@ -404,10 +619,153 @@
 	function applyTheme(themeMode: ThemeMode) {
 		document.body.dataset.theme = themeMode;
 	}
+
+	async function initializeAuth() {
+		if (!supabase) {
+			return;
+		}
+
+		authBusy = true;
+
+		const {
+			data: { session: authSession },
+			error
+		} = await supabase.auth.getSession();
+
+		if (error) {
+			authMessage = error.message;
+			authBusy = false;
+			return;
+		}
+
+		await syncAuthState(authSession?.user ?? null);
+		authBusy = false;
+
+		const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+			void syncAuthState(nextSession?.user ?? null);
+		});
+
+		authSubscription = data.subscription;
+	}
+
+	async function syncAuthState(nextUser: User | null) {
+		const requestId = ++currentAuthRequestId;
+		authUser = nextUser;
+		clearRemoteSyncTimeout();
+		syncQueued = false;
+
+		if (!nextUser) {
+			pendingAnonymousImportSession = null;
+			importPromptOpen = false;
+			loginModalOpen = false;
+			replaceLocalSession(EditorStorage.loadAnonymousState());
+			return;
+		}
+
+		authBusy = true;
+		authMessage = '';
+
+		try {
+			if (!supabase) return;
+
+			const userLocal = EditorStorage.loadUserState(nextUser.id);
+			const userSyncMeta = EditorStorage.loadUserSyncMeta(nextUser.id);
+			const anonymousSession = EditorStorage.loadAnonymousState();
+			const hasAnonymousData = hasSessionContent(anonymousSession);
+			const alreadyPrompted = EditorStorage.hasPromptedUserId(nextUser.id);
+
+			if (userLocal) {
+				replaceLocalSession(userLocal);
+			}
+
+			const remote = await readRemoteSession(supabase, nextUser.id);
+
+			if (currentAuthRequestId !== requestId) {
+				return;
+			}
+
+			if (userLocal) {
+				if (!userSyncMeta.dirty && hasRemoteContent(remote)) {
+					const remoteSession = buildSessionFromRemote(remote);
+					replaceLocalSession(remoteSession, {
+						persist: true,
+						dirty: false,
+						lastSyncedAt: userSyncMeta.lastSyncedAt
+					});
+				} else if (userSyncMeta.dirty) {
+					scheduleRemoteSync();
+				}
+
+				if (hasAnonymousData && !alreadyPrompted) {
+					pendingAnonymousImportSession = anonymousSession;
+					importPromptOpen = true;
+				}
+
+				loginModalOpen = false;
+				return;
+			}
+
+			const nextSession = hasRemoteContent(remote)
+				? buildSessionFromRemote(remote)
+				: createSession();
+			replaceLocalSession(nextSession, {
+				persist: true,
+				dirty: false,
+				lastSyncedAt: null
+			});
+
+			if (hasAnonymousData && !alreadyPrompted) {
+				pendingAnonymousImportSession = anonymousSession;
+				importPromptOpen = true;
+			}
+			loginModalOpen = false;
+		} catch (error) {
+			authMessage = getErrorMessage(error, 'Unable to load synced notes.');
+		} finally {
+			if (currentAuthRequestId === requestId) {
+				authBusy = false;
+			}
+		}
+	}
+
+	function persistWorkspaceState(
+		nextSession: EditorSession,
+		options: { dirty?: boolean; lastSyncedAt?: string | null } = {}
+	) {
+		if (!authUser) {
+			EditorStorage.saveAnonymousState(nextSession);
+			return;
+		}
+
+		EditorStorage.saveUserState(authUser.id, nextSession);
+		const currentMeta = EditorStorage.loadUserSyncMeta(authUser.id);
+		EditorStorage.saveUserSyncMeta(authUser.id, {
+			dirty: options.dirty ?? currentMeta.dirty,
+			lastSyncedAt:
+				options.lastSyncedAt === undefined ? currentMeta.lastSyncedAt : options.lastSyncedAt
+		});
+	}
+
+	function getErrorMessage(error: unknown, fallback: string) {
+		if (error instanceof Error && error.message) {
+			return error.message;
+		}
+
+		if (
+			typeof error === 'object' &&
+			error &&
+			'message' in error &&
+			typeof error.message === 'string'
+		) {
+			return error.message;
+		}
+
+		return fallback;
+	}
 </script>
 
 <svelte:window
-	on:beforeunload={() => EditorStorage.save(session)}
+	on:beforeunload={() => persistWorkspaceState(session)}
 	on:storage={handleStorage}
 	on:mousemove={handleMouseMove}
 	on:mousedown={handleWindowPointerDown}
@@ -424,8 +782,7 @@
 				aria-expanded={drawerOpen}
 				on:click={() => (drawerOpen = !drawerOpen)}
 			>
-				<span></span>
-				<span></span>
+				<Icon name="bars-3" />
 			</button>
 			<div class="settings-control">
 				<button
@@ -437,9 +794,7 @@
 					aria-label="Open editor settings"
 					on:click={toggleSettingsMenu}
 				>
-					<span></span>
-					<span></span>
-					<span></span>
+					<Icon name="ellipsis-horizontal" />
 				</button>
 				{#if settingsMenuOpen}
 					<FloatingMenu label="Editor settings" verticalOffset="0.45rem">
@@ -456,17 +811,31 @@
 						>
 							{getCountVisibilityLabel(preferences.countVisibility)}
 						</button>
+						{#if authUser}
+							<button type="button" disabled={authBusy} on:click={logout}>Logout</button>
+							<div class="menu-stat">{syncBusy ? 'Syncing...' : authUser.email}</div>
+						{:else}
+							<button
+								type="button"
+								on:click={() => {
+									loginModalOpen = true;
+									settingsMenuOpen = false;
+									authMessage = '';
+								}}
+							>
+								Login
+							</button>
+						{/if}
+						{#if authMessage && !loginModalOpen}
+							<div class="menu-stat">{authMessage}</div>
+						{/if}
 					</FloatingMenu>
 				{/if}
 			</div>
 		</div>
 	</div>
 
-	<div
-		class:count-visible={countVisible}
-		class:docked-right={countDockedRight}
-		class="count-shell"
-	>
+	<div class:count-visible={countVisible} class:docked-right={countDockedRight} class="count-shell">
 		{#if countVisibleInChrome}
 			<div class="count-control">
 				<button
@@ -482,7 +851,7 @@
 				</button>
 				{#if countMenuOpen}
 					<FloatingMenu label="Count display options" verticalOffset="0.45rem">
-						{#each countOptions as option}
+						{#each countOptions as option (option.id)}
 							<button
 								type="button"
 								role="menuitemradio"
@@ -511,17 +880,78 @@
 	{/if}
 
 	{#if deletePage}
-		<button class="modal-scrim" type="button" aria-label="Close delete dialog" on:click={closeDeleteModal}></button>
-		<div class="modal" role="dialog" aria-modal="true" aria-labelledby="delete-title">
-			<h2 id="delete-title">Delete page?</h2>
+		<Modal title="Delete page?" onClose={closeDeleteModal}>
 			<p>{deletePage.title}</p>
-			<div class="modal-actions">
+			<svelte:fragment slot="actions">
 				<button type="button" class="modal-button" on:click={closeDeleteModal}>Cancel</button>
-				<button type="button" class="modal-button modal-button-delete" on:click={() => closePage(deletePage.id)}>
+				<button
+					type="button"
+					class="modal-button modal-button-delete"
+					on:click={() => closePage(deletePage.id)}
+				>
 					Delete
 				</button>
-			</div>
-		</div>
+			</svelte:fragment>
+		</Modal>
+	{/if}
+
+	{#if loginModalOpen}
+		<Modal title="Login" onClose={closeLoginModal}>
+			<label class="auth-field">
+				<span>Email</span>
+				<input
+					bind:value={emailDraft}
+					class="auth-input"
+					type="email"
+					placeholder="you@example.com"
+					autocomplete="email"
+					on:keydown={(event) => {
+						if (event.key === 'Enter') {
+							event.preventDefault();
+							void submitLogin();
+						}
+					}}
+				/>
+			</label>
+			{#if authMessage}
+				<p class="auth-message">{authMessage}</p>
+			{/if}
+			<svelte:fragment slot="actions">
+				<button type="button" class="modal-button" on:click={closeLoginModal}>Cancel</button>
+				<button
+					type="button"
+					class="modal-button modal-button-primary"
+					disabled={loginSubmitting}
+					on:click={submitLogin}
+				>
+					{loginSubmitting ? 'Sending...' : 'Send link'}
+				</button>
+			</svelte:fragment>
+		</Modal>
+	{/if}
+
+	{#if importPromptOpen && pendingAnonymousImportSession}
+		<Modal title="Add local data to remote data?" dismissible={false}>
+			<p>Do you want local data added to remote data for this account?</p>
+			<svelte:fragment slot="actions">
+				<button
+					type="button"
+					class="modal-button"
+					disabled={syncBusy}
+					on:click={() => resolveAnonymousImport(false)}
+				>
+					No
+				</button>
+				<button
+					type="button"
+					class="modal-button modal-button-primary"
+					disabled={syncBusy}
+					on:click={() => resolveAnonymousImport(true)}
+				>
+					Yes
+				</button>
+			</svelte:fragment>
+		</Modal>
 	{/if}
 
 	<aside class:open={drawerOpen} class="drawer" aria-label="Pages">
@@ -574,13 +1004,12 @@
 							aria-expanded={menuPageId === page.id}
 							on:click={() => toggleMenu(page.id)}
 						>
-							<span></span>
-							<span></span>
-							<span></span>
+							<Icon name="ellipsis-horizontal" />
 						</button>
 						{#if menuPageId === page.id}
 							<FloatingMenu label={`Page menu for ${page.title}`}>
-								<button type="button" on:click={() => startEditingTitle(page.id)}>Edit title</button>
+								<button type="button" on:click={() => startEditingTitle(page.id)}>Edit title</button
+								>
 								<button type="button" on:click={() => openDeleteModal(page.id)}>Delete</button>
 							</FloatingMenu>
 						{/if}
@@ -666,10 +1095,7 @@
 		left: 0;
 		right: 0;
 		z-index: 20;
-		padding:
-			max(0.75rem, env(safe-area-inset-top))
-			max(0.75rem, env(safe-area-inset-right))
-			0
+		padding: max(0.75rem, env(safe-area-inset-top)) max(0.75rem, env(safe-area-inset-right)) 0
 			max(0.75rem, env(safe-area-inset-left));
 		opacity: 0;
 		pointer-events: none;
@@ -702,10 +1128,7 @@
 
 	.count-shell {
 		z-index: 21;
-		padding:
-			max(0.75rem, env(safe-area-inset-top))
-			max(0.75rem, env(safe-area-inset-right))
-			0
+		padding: max(0.75rem, env(safe-area-inset-top)) max(0.75rem, env(safe-area-inset-right)) 0
 			max(0.75rem, env(safe-area-inset-left));
 		opacity: 0;
 		pointer-events: none;
@@ -767,23 +1190,14 @@
 		padding: 0;
 		border-radius: 999px;
 		display: inline-flex;
-		flex-direction: column;
 		align-items: center;
 		justify-content: center;
-		gap: 0.28rem;
 	}
 
-	.drawer-toggle span {
-		display: block;
-		width: 1rem;
-		height: 1px;
-		background: var(--line-color);
-	}
-
-	.settings-control {
-		position: absolute;
-		top: 0;
-		right: 0;
+	.drawer-toggle :global(svg) {
+		width: 1.1rem;
+		height: 1.1rem;
+		color: var(--line-color);
 	}
 
 	.settings-toggle {
@@ -797,12 +1211,9 @@
 		gap: 0.2rem;
 	}
 
-	.settings-toggle span {
-		display: block;
-		width: 3px;
-		height: 3px;
-		border-radius: 999px;
-		background: var(--line-color);
+	.settings-toggle :global(svg) {
+		color: var(--line-color);
+		fill: currentColor;
 	}
 
 	.scrim {
@@ -811,52 +1222,6 @@
 		z-index: 10;
 		border: 0;
 		background: var(--chrome-scrim-color);
-	}
-
-	.modal-scrim {
-		position: fixed;
-		inset: 0;
-		z-index: 30;
-		border: 0;
-		background: var(--modal-scrim-color);
-	}
-
-	.modal {
-		position: fixed;
-		top: 50%;
-		left: 50%;
-		z-index: 31;
-		width: min(22rem, calc(100vw - 2rem));
-		padding: 1rem;
-		box-sizing: border-box;
-		background: var(--surface-color);
-		border: 1px solid var(--surface-border-color);
-		border-radius: 0.55rem;
-		box-shadow: 0 18px 50px var(--surface-shadow-color);
-		transform: translate(-50%, -50%);
-	}
-
-	.modal h2,
-	.modal p {
-		margin: 0;
-	}
-
-	.modal h2 {
-		font-size: 0.9rem;
-		font-weight: 400;
-	}
-
-	.modal p {
-		margin-top: 0.45rem;
-		font-size: 0.82rem;
-		color: var(--muted-text-color);
-	}
-
-	.modal-actions {
-		display: flex;
-		justify-content: flex-end;
-		gap: 0.45rem;
-		margin-top: 1rem;
 	}
 
 	.modal-button {
@@ -880,6 +1245,43 @@
 
 	.modal-button-delete:hover {
 		background: #9f1f15;
+	}
+
+	.modal-button-primary {
+		background: var(--text-color);
+		color: var(--page-background);
+	}
+
+	.modal-button-primary:hover {
+		background: var(--text-color);
+		opacity: 0.9;
+	}
+
+	.modal-button:disabled {
+		cursor: default;
+		opacity: 0.55;
+	}
+
+	.auth-field {
+		display: flex;
+		flex-direction: column;
+		gap: 0.45rem;
+		font-size: 0.78rem;
+	}
+
+	.auth-input {
+		width: 100%;
+		box-sizing: border-box;
+		padding: 0.65rem 0.75rem;
+		border: 1px solid var(--surface-border-color);
+		border-radius: 0.4rem;
+		background: transparent;
+		color: inherit;
+		font: inherit;
+	}
+
+	.auth-message {
+		margin-top: 0.55rem;
 	}
 
 	.drawer {
@@ -981,76 +1383,32 @@
 	}
 
 	.menu-toggle {
-		opacity: 0.45;
-		flex-direction: row;
-		gap: 0.15rem;
-	}
-
-	.menu-toggle span {
-		display: block;
-		width: 3px;
-		height: 3px;
 		border-radius: 999px;
-		background: var(--line-color);
 	}
 
-	.page-row:hover .menu-toggle,
-	.page-row.active .menu-toggle {
-		opacity: 1;
-	}
-
-	.menu-toggle[aria-expanded='true'] {
-		opacity: 0;
-		pointer-events: none;
+	.menu-toggle :global(svg) {
+		color: var(--line-color);
+		fill: currentColor;
 	}
 
 	.title-input {
-		width: 100%;
 		min-width: 0;
 		border: 0;
 		outline: none;
 		background: transparent;
-		font: inherit;
 		color: inherit;
-		padding: 0;
+		font: inherit;
+		font-size: 0.82rem;
 	}
 
 	.confirm-title {
-		width: 1.75rem;
-		height: 1.75rem;
+		width: 1.5rem;
+		height: 1.5rem;
 		padding: 0;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
+		border-radius: 999px;
 	}
 
 	.workspace {
-		width: 100%;
 		min-height: 100vh;
-		background: var(--page-background);
-	}
-
-	@media (max-width: 767px) {
-		.top-bar-shell {
-			padding:
-				max(0.6rem, env(safe-area-inset-top))
-				max(0.6rem, env(safe-area-inset-right))
-				0
-				max(0.6rem, env(safe-area-inset-left));
-		}
-
-		.count-shell {
-			padding:
-				max(0.6rem, env(safe-area-inset-top))
-				max(0.6rem, env(safe-area-inset-right))
-				0
-				max(0.6rem, env(safe-area-inset-left));
-		}
-
-		.count-toggle {
-			max-width: calc(100vw - 5rem);
-			padding-inline: 0.65rem;
-			font-size: 0.72rem;
-		}
 	}
 </style>
