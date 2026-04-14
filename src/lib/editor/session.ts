@@ -45,6 +45,21 @@ export function createSession(): EditorSession {
 	};
 }
 
+export function ensureValidActivePage(session: EditorSession): EditorSession {
+	if (session.pages.length === 0) {
+		return createSession();
+	}
+
+	if (session.pages.some((page) => page.id === session.activePageId)) {
+		return session;
+	}
+
+	return {
+		...session,
+		activePageId: session.pages[0]!.id
+	};
+}
+
 export function updatePageState(page: EditorPage, state: EditorState): EditorPage {
 	return {
 		...page,
@@ -86,7 +101,7 @@ export function normalizeSession(value: unknown): EditorSession | null {
 			? value.activePageId
 			: pages[0].id;
 
-	return { pages, activePageId };
+	return ensureValidActivePage({ pages, activePageId });
 }
 
 export function migrateLegacyState(state: EditorState): EditorSession {

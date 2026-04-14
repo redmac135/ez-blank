@@ -1,5 +1,11 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { createSession, type EditorPage, type EditorSession, UNTITLED_PAGE } from './session';
+import {
+	createSession,
+	ensureValidActivePage,
+	type EditorPage,
+	type EditorSession,
+	UNTITLED_PAGE
+} from './session';
 
 export interface RemotePageRecord {
 	id: string;
@@ -113,6 +119,7 @@ export async function saveRemoteSession(
 	userId: string,
 	session: EditorSession
 ): Promise<RemoteSyncResult> {
+	const normalizedSession = ensureValidActivePage(session);
 	const { data: existingPages, error: existingPagesError } = await supabase
 		.from('pages')
 		.select('id')
@@ -123,8 +130,8 @@ export async function saveRemoteSession(
 	}
 
 	const existingIds = new Set((existingPages ?? []).map((page) => page.id));
-	const remotePages = session.pages.filter((page) => isRemotePageId(page.id));
-	const localPages = session.pages.filter((page) => !isRemotePageId(page.id));
+	const remotePages = normalizedSession.pages.filter((page) => isRemotePageId(page.id));
+	const localPages = normalizedSession.pages.filter((page) => !isRemotePageId(page.id));
 
 	if (remotePages.length > 0) {
 		const { error: upsertError } = await supabase.from('pages').upsert(
@@ -153,7 +160,8 @@ export async function saveRemoteSession(
 		}
 	}
 
-	const activePageId = pageIdMap.get(session.activePageId) ?? session.activePageId;
+	const activePageId =
+		pageIdMap.get(normalizedSession.activePageId) ?? normalizedSession.activePageId;
 	await upsertUserSettings(supabase, userId, isRemotePageId(activePageId) ? activePageId : null);
 
 	return {

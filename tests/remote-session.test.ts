@@ -5,9 +5,46 @@ import {
 	buildSessionFromRemote,
 	hasRemoteContent,
 	hasSessionContent,
+	saveRemoteSession,
 	type RemoteAppState
 } from '../src/lib/editor/remote-session.ts';
 import { createSession } from '../src/lib/editor/session.ts';
+
+class SupabaseStub {
+	constructor(private pages: Array<{ id: string }> = []) {}
+
+	from(table: string) {
+		if (table === 'pages') {
+			return {
+				select: () => ({
+					eq: async () => ({ data: this.pages, error: null })
+				}),
+				upsert: async () => ({ error: null }),
+				delete: () => ({
+					in: async () => ({ error: null })
+				}),
+				insert: (value: unknown) => {
+					void value;
+					return {
+						select: () => ({
+							single: async () => ({
+								data: { id: 'f16d9a88-8e66-4db4-a0a5-8090c05690a2' },
+								error: null
+							})
+						})
+					};
+				}
+			};
+		}
+
+		return {
+			upsert: async (value: { active_page_id: string | null }) => ({
+				data: value,
+				error: null
+			})
+		};
+	}
+}
 
 test('hasSessionContent treats the default blank session as empty', () => {
 	assert.equal(hasSessionContent(createSession()), false);
@@ -58,4 +95,14 @@ test('applyPageIdMap replaces local ids with remote ids without dropping content
 	assert.equal(remapped.pages[0]?.id, 'f16d9a88-8e66-4db4-a0a5-8090c05690a2');
 	assert.equal(remapped.pages[0]?.content, session.pages[0]?.content);
 	assert.equal(remapped.activePageId, 'f16d9a88-8e66-4db4-a0a5-8090c05690a2');
+});
+
+test('saveRemoteSession repairs a missing active page before writing user settings', async () => {
+	const session = createSession();
+	const result = await saveRemoteSession(new SupabaseStub() as never, 'user-a', {
+		...session,
+		activePageId: 'missing'
+	});
+
+	assert.equal(result.activePageId, 'f16d9a88-8e66-4db4-a0a5-8090c05690a2');
 });

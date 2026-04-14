@@ -5,6 +5,7 @@
 	import FloatingMenu from '$lib/FloatingMenu.svelte';
 	import Icon from '$lib/Icon.svelte';
 	import Modal from '$lib/Modal.svelte';
+	import OtpInput from '$lib/OtpInput.svelte';
 	import {
 		applyEditorStateUpdate,
 		applyHydratedSession,
@@ -27,11 +28,17 @@
 		type ThemeMode
 	} from '$lib/editor/preferences';
 	import { type EditorState } from '$lib/editor/history';
+	import {
+		findSavedAuthSessionByEmail,
+		removeSavedAuthSession,
+		saveAuthSession
+	} from '$lib/auth/session-vault';
 	import { EditorStorage } from '$lib/editor/storage';
-	import { supabase } from '$lib/supabaseClient';
+	import { clearActiveSupabaseSession, getSupabaseClient } from '$lib/supabaseClient';
 	import {
 		createPage,
 		createSession,
+		ensureValidActivePage,
 		type EditorPage,
 		type EditorSession,
 		updatePageTitle
@@ -45,6 +52,7 @@
 	let deletePageId: string | null = null;
 	let titleDraft = '';
 	let emailDraft = '';
+	let otpDraft = '';
 	let titleInput: HTMLInputElement | null = null;
 	let countButton: HTMLButtonElement | null = null;
 	let settingsButton: HTMLButtonElement | null = null;
@@ -58,15 +66,22 @@
 	let hideChromeTimeout: ReturnType<typeof setTimeout> | null = null;
 	let remoteSyncTimeout: ReturnType<typeof setTimeout> | null = null;
 	let preferences: EditorPreferences = DEFAULT_PREFERENCES;
+	let supabase = getSupabaseClient();
 	let authUser: User | null = null;
 	let authBusy = false;
 	let authMessage = '';
 	let loginSubmitting = false;
+	let loginStep: 'email' | 'otp' = 'email';
+	let otpVerifying = false;
+	let otpShake = false;
+	let resendCooldownRemaining = 0;
+	let resendCooldownInterval: ReturnType<typeof setInterval> | null = null;
 	let syncBusy = false;
 	let syncQueued = false;
 	let pendingAnonymousImportSession: EditorSession | null = null;
 	let currentAuthRequestId = 0;
 	let authSubscription: { unsubscribe: () => void } | null = null;
+	let suppressSavedSessionRemoval = false;
 
 	const TOP_REVEAL_HEIGHT = 112;
 	const CHROME_HIDE_DELAY = 1400;
@@ -128,7 +143,8 @@
 	}
 
 	function persistSession(nextSession: EditorSession) {
-		const transition = applySessionUpdate({ session, loaded }, nextSession);
+		const normalizedSession = ensureValidActivePage(nextSession);
+		const transition = applySessionUpdate({ session, loaded }, normalizedSession);
 		session = transition.state.session;
 		if (transition.persistedSession) {
 			persistWorkspaceState(transition.persistedSession, authUser ? { dirty: true } : undefined);
@@ -142,9 +158,9 @@
 		nextSession: EditorSession,
 		options: { persist?: boolean; dirty?: boolean; lastSyncedAt?: string | null } = {}
 	) {
-		session = nextSession;
+		session = ensureValidActivePage(nextSession);
 		if (loaded && options.persist) {
-			persistWorkspaceState(nextSession, {
+			persistWorkspaceState(session, {
 				dirty: options.dirty,
 				lastSyncedAt: options.lastSyncedAt
 			});
@@ -251,8 +267,11 @@
 	}
 
 	function closeLoginModal() {
-		if (loginSubmitting) return;
+		if (loginSubmitting || otpVerifying) return;
 		loginModalOpen = false;
+		loginStep = 'email';
+		otpDraft = '';
+		stopResendCooldown();
 		authMessage = '';
 	}
 
@@ -271,11 +290,73 @@
 		loginSubmitting = true;
 		authMessage = '';
 
-		const { error } = await supabase.auth.signInWithOtp({
-			email,
-			options: {
-				emailRedirectTo: window.location.href
+		const savedSession = findSavedAuthSessionByEmail(email);
+		if (savedSession) {
+			const { error: restoreError } = await supabase.auth.setSession({
+				access_token: savedSession.session.access_token,
+				refresh_token: savedSession.session.refresh_token
+			});
+
+			if (!restoreError) {
+				loginSubmitting = false;
+				loginModalOpen = false;
+				loginStep = 'email';
+				otpDraft = '';
+				return;
 			}
+
+			removeSavedAuthSession(savedSession.userId);
+		}
+
+		const { error } = await supabase.auth.signInWithOtp({ email });
+
+		loginSubmitting = false;
+
+		if (error) {
+			authMessage = error.message;
+			return;
+		}
+
+		loginStep = 'otp';
+		otpDraft = '';
+		startResendCooldown();
+	}
+
+	async function verifyOtpCode(code: string) {
+		if (!supabase || otpVerifying || code.length !== 8) return;
+
+		otpVerifying = true;
+		authMessage = '';
+
+		const { error } = await supabase.auth.verifyOtp({
+			email: emailDraft.trim(),
+			token: code,
+			type: 'email'
+		});
+
+		otpVerifying = false;
+
+		if (error) {
+			otpDraft = '';
+			authMessage = error.message;
+			triggerOtpShake();
+			return;
+		}
+
+		loginModalOpen = false;
+		loginStep = 'email';
+		otpDraft = '';
+		stopResendCooldown();
+	}
+
+	async function resendOtpCode() {
+		if (!supabase || resendCooldownRemaining > 0 || loginSubmitting || otpVerifying) return;
+
+		loginSubmitting = true;
+		authMessage = '';
+
+		const { error } = await supabase.auth.signInWithOtp({
+			email: emailDraft.trim()
 		});
 
 		loginSubmitting = false;
@@ -285,25 +366,48 @@
 			return;
 		}
 
-		authMessage = 'Check your email for the login link.';
+		startResendCooldown();
+		authMessage = 'A new code was sent.';
+	}
+
+	function startResendCooldown() {
+		stopResendCooldown();
+		resendCooldownRemaining = 30;
+		resendCooldownInterval = setInterval(() => {
+			resendCooldownRemaining = Math.max(0, resendCooldownRemaining - 1);
+			if (resendCooldownRemaining === 0) {
+				stopResendCooldown();
+			}
+		}, 1000);
+	}
+
+	function stopResendCooldown() {
+		if (resendCooldownInterval) {
+			clearInterval(resendCooldownInterval);
+			resendCooldownInterval = null;
+		}
+	}
+
+	function triggerOtpShake() {
+		otpShake = false;
+		requestAnimationFrame(() => {
+			otpShake = true;
+			setTimeout(() => {
+				otpShake = false;
+			}, 300);
+		});
 	}
 
 	async function logout() {
-		if (!supabase || authBusy) return;
+		if (authBusy) return;
 
 		authBusy = true;
 		authMessage = '';
 		clearRemoteSyncTimeout();
-
-		const { error } = await supabase.auth.signOut();
-
+		suppressSavedSessionRemoval = true;
+		await clearActiveSupabaseSession();
+		suppressSavedSessionRemoval = false;
 		authBusy = false;
-
-		if (error) {
-			authMessage = error.message;
-			return;
-		}
-
 		settingsMenuOpen = false;
 	}
 
@@ -595,6 +699,7 @@
 	onDestroy(() => {
 		clearHideChromeTimeout();
 		clearRemoteSyncTimeout();
+		stopResendCooldown();
 		authSubscription?.unsubscribe();
 	});
 
@@ -638,10 +743,19 @@
 			return;
 		}
 
+		if (authSession) {
+			saveAuthSession(authSession);
+		}
+
 		await syncAuthState(authSession?.user ?? null);
 		authBusy = false;
 
-		const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+		const { data } = supabase.auth.onAuthStateChange((event, nextSession) => {
+			if (nextSession) {
+				saveAuthSession(nextSession);
+			} else if (event === 'SIGNED_OUT' && authUser && !suppressSavedSessionRemoval) {
+				removeSavedAuthSession(authUser.id);
+			}
 			void syncAuthState(nextSession?.user ?? null);
 		});
 
@@ -897,35 +1011,82 @@
 
 	{#if loginModalOpen}
 		<Modal title="Login" onClose={closeLoginModal}>
-			<label class="auth-field">
-				<span>Email</span>
-				<input
-					bind:value={emailDraft}
-					class="auth-input"
-					type="email"
-					placeholder="you@example.com"
-					autocomplete="email"
-					on:keydown={(event) => {
-						if (event.key === 'Enter') {
-							event.preventDefault();
-							void submitLogin();
-						}
-					}}
-				/>
-			</label>
+			{#if loginStep === 'email'}
+				<label class="auth-field">
+					<span>Email</span>
+					<input
+						bind:value={emailDraft}
+						class="auth-input"
+						type="email"
+						placeholder="you@example.com"
+						autocomplete="email"
+						on:keydown={(event) => {
+							if (event.key === 'Enter') {
+								event.preventDefault();
+								void submitLogin();
+							}
+						}}
+					/>
+				</label>
+			{:else}
+				<div class="auth-field">
+					<span>Code sent to {emailDraft.trim()}</span>
+					<OtpInput
+						value={otpDraft}
+						disabled={otpVerifying}
+						shake={otpShake}
+						on:change={(event) => {
+							otpDraft = event.detail.value;
+						}}
+						on:complete={(event) => {
+							void verifyOtpCode(event.detail.value);
+						}}
+					/>
+				</div>
+			{/if}
 			{#if authMessage}
 				<p class="auth-message">{authMessage}</p>
 			{/if}
 			<svelte:fragment slot="actions">
-				<button type="button" class="modal-button" on:click={closeLoginModal}>Cancel</button>
-				<button
-					type="button"
-					class="modal-button modal-button-primary"
-					disabled={loginSubmitting}
-					on:click={submitLogin}
-				>
-					{loginSubmitting ? 'Sending...' : 'Send link'}
-				</button>
+				{#if loginStep === 'otp'}
+					<button
+						type="button"
+						class="modal-button"
+						disabled={resendCooldownRemaining > 0 || loginSubmitting || otpVerifying}
+						on:click={resendOtpCode}
+					>
+						{#if resendCooldownRemaining > 0}
+							Resend code ({resendCooldownRemaining}s)
+						{:else}
+							Resend code
+						{/if}
+					</button>
+					<button
+						type="button"
+						class="modal-button"
+						disabled={otpVerifying}
+						on:click={() => {
+							loginStep = 'email';
+							otpDraft = '';
+							authMessage = '';
+						}}
+					>
+						Back
+					</button>
+					<div class="auth-status" aria-live="polite">
+						{otpVerifying ? 'Verifying…' : ''}
+					</div>
+				{:else}
+					<button type="button" class="modal-button" on:click={closeLoginModal}>Cancel</button>
+					<button
+						type="button"
+						class="modal-button modal-button-primary"
+						disabled={loginSubmitting}
+						on:click={submitLogin}
+					>
+						{loginSubmitting ? 'Sending…' : 'Send Email'}
+					</button>
+				{/if}
 			</svelte:fragment>
 		</Modal>
 	{/if}
@@ -1266,7 +1427,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.45rem;
-		font-size: 0.78rem;
+		font-size: 0.7rem;
 	}
 
 	.auth-input {
@@ -1282,6 +1443,17 @@
 
 	.auth-message {
 		margin-top: 0.55rem;
+	}
+
+	.auth-status {
+		font: inherit;
+		font-size: 0.74rem;
+		color: var(--muted-text-color);
+	}
+
+	.auth-status {
+		min-width: 4.5rem;
+		text-align: right;
 	}
 
 	.drawer {

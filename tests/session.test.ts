@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
 	createSession,
 	derivePageTitle,
+	ensureValidActivePage,
 	normalizeSession,
 	updatePageState
 } from '../src/lib/editor/session.ts';
@@ -52,4 +53,22 @@ test('updatePageState refreshes content and derives titles from the first non-em
 
 test('derivePageTitle falls back to Untitled for blank content', () => {
 	assert.equal(derivePageTitle('   \n  '), 'Untitled');
+});
+
+test('ensureValidActivePage falls back to the first page when the active page is missing', () => {
+	const repaired = ensureValidActivePage({
+		activePageId: 'missing',
+		pages: [
+			{
+				id: 'page-a',
+				title: 'A',
+				content: 'alpha',
+				text: 'alpha',
+				selectionStart: 0,
+				selectionEnd: 0
+			}
+		]
+	});
+
+	assert.equal(repaired.activePageId, 'page-a');
 });
