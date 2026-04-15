@@ -3,11 +3,13 @@ import { createSession, normalizeSession, type EditorSession } from './session';
 export interface UserSyncMeta {
 	dirty: boolean;
 	lastSyncedAt: string | null;
+	pageVersions: Record<string, string | null>;
 }
 
 const DEFAULT_SYNC_META: UserSyncMeta = {
 	dirty: false,
-	lastSyncedAt: null
+	lastSyncedAt: null,
+	pageVersions: {}
 };
 
 export class EditorStorage {
@@ -85,7 +87,8 @@ export class EditorStorage {
 			const parsed = JSON.parse(stored);
 			return {
 				dirty: parsed?.dirty === true,
-				lastSyncedAt: typeof parsed?.lastSyncedAt === 'string' ? parsed.lastSyncedAt : null
+				lastSyncedAt: typeof parsed?.lastSyncedAt === 'string' ? parsed.lastSyncedAt : null,
+				pageVersions: normalizePageVersions(parsed?.pageVersions)
 			};
 		} catch (e) {
 			console.error('Failed to load user sync meta:', e);
@@ -155,4 +158,16 @@ export class EditorStorage {
 		localStorage.removeItem(this.LEGACY_STORAGE_KEY);
 		return this.deserializeSession(current);
 	}
+}
+
+function normalizePageVersions(value: unknown): Record<string, string | null> {
+	if (!value || typeof value !== 'object') {
+		return {};
+	}
+
+	return Object.fromEntries(
+		Object.entries(value as Record<string, unknown>).filter(([, version]) => {
+			return typeof version === 'string' || version === null;
+		}) as Array<[string, string | null]>
+	);
 }

@@ -33,7 +33,9 @@ function createSession(activePageId = 'page-a'): EditorSession {
 				content: 'alpha',
 				text: 'alpha',
 				selectionStart: 0,
-				selectionEnd: 0
+				selectionEnd: 0,
+				updatedAt: '2026-04-14T00:00:00.000Z',
+				lastSyncedVersion: '2026-04-14T00:00:00.000Z'
 			},
 			{
 				id: 'page-b',
@@ -41,7 +43,9 @@ function createSession(activePageId = 'page-a'): EditorSession {
 				content: 'beta',
 				text: 'beta',
 				selectionStart: 0,
-				selectionEnd: 0
+				selectionEnd: 0,
+				updatedAt: '2026-04-14T00:00:00.000Z',
+				lastSyncedVersion: '2026-04-14T00:00:00.000Z'
 			}
 		]
 	};
@@ -77,19 +81,22 @@ test('EditorStorage saves and loads user-scoped state separately per account', (
 test('EditorStorage loads default sync metadata when none exists', () => {
 	assert.deepEqual(EditorStorage.loadUserSyncMeta('user-a'), {
 		dirty: false,
-		lastSyncedAt: null
+		lastSyncedAt: null,
+		pageVersions: {}
 	});
 });
 
 test('EditorStorage saves and loads user sync metadata', () => {
 	EditorStorage.saveUserSyncMeta('user-a', {
 		dirty: true,
-		lastSyncedAt: '2026-04-14T00:00:00.000Z'
+		lastSyncedAt: '2026-04-14T00:00:00.000Z',
+		pageVersions: { 'page-a': '2026-04-14T00:00:00.000Z' }
 	});
 
 	assert.deepEqual(EditorStorage.loadUserSyncMeta('user-a'), {
 		dirty: true,
-		lastSyncedAt: '2026-04-14T00:00:00.000Z'
+		lastSyncedAt: '2026-04-14T00:00:00.000Z',
+		pageVersions: { 'page-a': '2026-04-14T00:00:00.000Z' }
 	});
 });
 

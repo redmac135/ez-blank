@@ -6,7 +6,27 @@
 	let { children } = $props();
 
 	onMount(() => {
-		useRegisterSW();
+		const hadController = typeof navigator !== 'undefined' && !!navigator.serviceWorker?.controller;
+
+		useRegisterSW({
+			onRegisteredSW(_swUrl: string, registration: ServiceWorkerRegistration | undefined) {
+				if (!registration?.active) {
+					return;
+				}
+
+				navigator.serviceWorker.addEventListener('controllerchange', () => {
+					if (!hadController) {
+						return;
+					}
+
+					try {
+						localStorage.setItem('blank-app-updated-notice', 'App updated');
+					} catch (error) {
+						void error;
+					}
+				});
+			}
+		});
 	});
 </script>
 

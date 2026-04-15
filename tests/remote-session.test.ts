@@ -8,20 +8,32 @@ import {
 	saveRemoteSession,
 	type RemoteAppState
 } from '../src/lib/editor/remote-session.ts';
-import { createSession } from '../src/lib/editor/session.ts';
+import { createPage, createSession } from '../src/lib/editor/session.ts';
 
 class SupabaseStub {
-	constructor(private pages: Array<{ id: string }> = []) {}
+	pageUpserts: Array<unknown> = [];
+	settingUpserts: Array<unknown> = [];
+	removedIds: Array<string[]> = [];
+
+	constructor(private pages: Array<{ id: string; title?: string; content?: string }> = []) {}
 
 	from(table: string) {
 		if (table === 'pages') {
 			return {
 				select: () => ({
-					eq: async () => ({ data: this.pages, error: null })
+					eq: () => ({
+						order: async () => ({ data: this.pages, error: null })
+					})
 				}),
-				upsert: async () => ({ error: null }),
+				upsert: async (value: unknown) => {
+					this.pageUpserts.push(value);
+					return { error: null };
+				},
 				delete: () => ({
-					in: async () => ({ error: null })
+					in: async (value: string[]) => {
+						this.removedIds.push(value);
+						return { error: null };
+					}
 				}),
 				insert: (value: unknown) => {
 					void value;
@@ -38,10 +50,18 @@ class SupabaseStub {
 		}
 
 		return {
-			upsert: async (value: { active_page_id: string | null }) => ({
-				data: value,
-				error: null
-			})
+			select: () => ({
+				eq: () => ({
+					maybeSingle: async () => ({
+						data: { active_page_id: null },
+						error: null
+					})
+				})
+			}),
+			upsert: async (value: { active_page_id: string | null }) => {
+				this.settingUpserts.push(value);
+				return { data: value, error: null };
+			}
 		};
 	}
 }
@@ -105,4 +125,40 @@ test('saveRemoteSession repairs a missing active page before writing user settin
 	});
 
 	assert.equal(result.activePageId, 'f16d9a88-8e66-4db4-a0a5-8090c05690a2');
+});
+
+test('saveRemoteSession skips unchanged remote rows and only writes diffs', async () => {
+	const stub = new SupabaseStub([
+		{ id: 'f16d9a88-8e66-4db4-a0a5-8090c05690a2', title: 'Remote title', content: 'remote body' }
+	]);
+	const session = createSession();
+	session.pages = [
+		{
+			id: 'f16d9a88-8e66-4db4-a0a5-8090c05690a2',
+			title: 'Remote title',
+			content: 'remote body',
+			text: 'remote body',
+			selectionStart: 0,
+			selectionEnd: 0,
+			updatedAt: '2026-04-15T16:12:00.000Z',
+			lastSyncedVersion: '2026-04-15T16:12:00.000Z'
+		},
+		createPage('local body')
+	];
+	session.activePageId = 'f16d9a88-8e66-4db4-a0a5-8090c05690a2';
+
+	await saveRemoteSession(stub as never, 'user-a', session, {
+		activePageId: 'f16d9a88-8e66-4db4-a0a5-8090c05690a2',
+		pages: [
+			{
+				id: 'f16d9a88-8e66-4db4-a0a5-8090c05690a2',
+				title: 'Remote title',
+				content: 'remote body'
+			}
+		]
+	});
+
+	assert.equal(stub.pageUpserts.length, 0);
+	assert.equal(stub.settingUpserts.length, 0);
+	assert.equal(stub.removedIds.length, 0);
 });

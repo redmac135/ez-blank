@@ -12,6 +12,7 @@ export interface RemotePageRecord {
 	title: string;
 	content: string;
 	created_at?: string;
+	updated_at?: string;
 }
 
 export interface RemoteAppState {
@@ -54,7 +55,9 @@ export function buildSessionFromRemote(remote: RemoteAppState): EditorSession {
 		content: page.content,
 		text: page.content,
 		selectionStart: 0,
-		selectionEnd: 0
+		selectionEnd: 0,
+		updatedAt: page.updated_at ?? page.created_at ?? new Date().toISOString(),
+		lastSyncedVersion: page.updated_at ?? page.created_at ?? null
 	}));
 
 	const activePageId =
@@ -94,7 +97,7 @@ export async function readRemoteSession(
 		await Promise.all([
 			supabase
 				.from('pages')
-				.select('id,title,content,created_at')
+				.select('id,title,content,created_at,updated_at')
 				.eq('user_id', userId)
 				.order('created_at', { ascending: true }),
 			supabase.from('user_settings').select('active_page_id').eq('user_id', userId).maybeSingle()
@@ -117,25 +120,24 @@ export async function readRemoteSession(
 export async function saveRemoteSession(
 	supabase: SupabaseClient,
 	userId: string,
-	session: EditorSession
+	session: EditorSession,
+	currentRemote?: RemoteAppState
 ): Promise<RemoteSyncResult> {
 	const normalizedSession = ensureValidActivePage(session);
-	const { data: existingPages, error: existingPagesError } = await supabase
-		.from('pages')
-		.select('id')
-		.eq('user_id', userId);
-
-	if (existingPagesError) {
-		throw existingPagesError;
-	}
-
-	const existingIds = new Set((existingPages ?? []).map((page) => page.id));
-	const remotePages = normalizedSession.pages.filter((page) => isRemotePageId(page.id));
+	const currentRemotePages =
+		currentRemote?.pages ?? (await readRemoteSession(supabase, userId)).pages;
+	const remotePageMap = new Map(currentRemotePages.map((page) => [page.id, page]));
+	const existingIds = new Set(currentRemotePages.map((page) => page.id));
+	const remotePagesToSave = normalizedSession.pages.filter((page) => isRemotePageId(page.id));
 	const localPages = normalizedSession.pages.filter((page) => !isRemotePageId(page.id));
+	const pagesToUpdate = remotePagesToSave.filter((page) => {
+		const currentPage = remotePageMap.get(page.id);
+		return !currentPage || currentPage.title !== page.title || currentPage.content !== page.content;
+	});
 
-	if (remotePages.length > 0) {
+	if (pagesToUpdate.length > 0) {
 		const { error: upsertError } = await supabase.from('pages').upsert(
-			remotePages.map((page) => ({
+			pagesToUpdate.map((page) => ({
 				id: page.id,
 				user_id: userId,
 				title: page.title,
@@ -149,7 +151,7 @@ export async function saveRemoteSession(
 	}
 
 	const pageIdMap = await insertPages(supabase, userId, localPages);
-	const retainedIds = new Set(remotePages.map((page) => page.id));
+	const retainedIds = new Set([...remotePagesToSave.map((page) => page.id), ...pageIdMap.values()]);
 	const deletedIds = [...existingIds].filter((id) => !retainedIds.has(id));
 
 	if (deletedIds.length > 0) {
@@ -162,7 +164,10 @@ export async function saveRemoteSession(
 
 	const activePageId =
 		pageIdMap.get(normalizedSession.activePageId) ?? normalizedSession.activePageId;
-	await upsertUserSettings(supabase, userId, isRemotePageId(activePageId) ? activePageId : null);
+	const remoteActivePageId = currentRemote?.activePageId ?? null;
+	if (remoteActivePageId !== (isRemotePageId(activePageId) ? activePageId : null)) {
+		await upsertUserSettings(supabase, userId, isRemotePageId(activePageId) ? activePageId : null);
+	}
 
 	return {
 		pageIdMap,

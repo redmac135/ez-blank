@@ -4,6 +4,8 @@ export interface EditorPage extends EditorState {
 	id: string;
 	title: string;
 	content: string;
+	updatedAt: string;
+	lastSyncedVersion: string | null;
 }
 
 export interface EditorSession {
@@ -27,13 +29,16 @@ export function derivePageTitle(content: string): string {
 }
 
 export function createPage(content = '', id = createPageId()): EditorPage {
+	const updatedAt = new Date().toISOString();
 	return {
 		id,
 		title: derivePageTitle(content),
 		content,
 		text: content,
 		selectionStart: 0,
-		selectionEnd: 0
+		selectionEnd: 0,
+		updatedAt,
+		lastSyncedVersion: null
 	};
 }
 
@@ -61,19 +66,23 @@ export function ensureValidActivePage(session: EditorSession): EditorSession {
 }
 
 export function updatePageState(page: EditorPage, state: EditorState): EditorPage {
+	const updatedAt = new Date().toISOString();
 	return {
 		...page,
 		...state,
 		content: state.text,
-		title: derivePageTitle(state.text)
+		title: derivePageTitle(state.text),
+		updatedAt
 	};
 }
 
 export function updatePageTitle(page: EditorPage, title: string): EditorPage {
+	const updatedAt = new Date().toISOString();
 	const trimmed = title.trim();
 	return {
 		...page,
-		title: trimmed.length > 0 ? trimmed.slice(0, 48) : UNTITLED_PAGE
+		title: trimmed.length > 0 ? trimmed.slice(0, 48) : UNTITLED_PAGE,
+		updatedAt
 	};
 }
 
@@ -140,7 +149,17 @@ function normalizePage(value: unknown, index: number): EditorPage | null {
 		content: normalizedContent,
 		text: normalizedContent,
 		selectionStart,
-		selectionEnd
+		selectionEnd,
+		updatedAt:
+			typeof value.updatedAt === 'string' && value.updatedAt.length > 0
+				? value.updatedAt
+				: new Date().toISOString(),
+		lastSyncedVersion:
+			typeof value.lastSyncedVersion === 'string'
+				? value.lastSyncedVersion
+				: typeof value.serverVersion === 'string'
+					? value.serverVersion
+					: null
 	};
 }
 

@@ -65,7 +65,9 @@ test('ensureValidActivePage falls back to the first page when the active page is
 				content: 'alpha',
 				text: 'alpha',
 				selectionStart: 0,
-				selectionEnd: 0
+				selectionEnd: 0,
+				updatedAt: '2026-04-14T00:00:00.000Z',
+				lastSyncedVersion: null
 			}
 		]
 	});
