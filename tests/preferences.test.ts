@@ -4,7 +4,7 @@ import {
 	cycleCountVisibility,
 	getCountVisibilityLabel,
 	normalizePreferences
-} from '../src/lib/editor/preferences.ts';
+} from '../src/lib/editor/core/preferences.ts';
 
 test('normalizePreferences falls back to safe defaults', () => {
 	assert.deepEqual(normalizePreferences(null), {

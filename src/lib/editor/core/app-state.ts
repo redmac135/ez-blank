@@ -1,4 +1,4 @@
-import type { EditorState } from './history';
+import type { EditorState } from '../basic/history';
 import type { EditorSession } from './session';
 import { updatePageState } from './session';
 
@@ -12,7 +12,7 @@ export interface PageAppTransition {
 	persistedSession: EditorSession | null;
 }
 
-export function applyHydratedSession(state: PageAppState, session: EditorSession): PageAppState {
+export function applyHydratedSession(session: EditorSession): PageAppState {
 	return {
 		session,
 		loaded: true

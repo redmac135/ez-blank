@@ -5,8 +5,8 @@ import {
 	applyHydratedSession,
 	applySessionUpdate,
 	type PageAppState
-} from '../src/lib/editor/app-state.ts';
-import { createSession } from '../src/lib/editor/session.ts';
+} from '../src/lib/editor/core/app-state.ts';
+import { createSession } from '../src/lib/editor/core/session.ts';
 
 function createLoadedSession(text: string) {
 	const session = createSession();
@@ -45,10 +45,8 @@ test('hydration after a pre-load empty editor update restores the stored content
 		selectionStart: 0,
 		selectionEnd: 0
 	});
-	const hydrated = applyHydratedSession(
-		preHydrationEdit.state,
-		createLoadedSession('latest content')
-	);
+	assert.equal(preHydrationEdit.state.loaded, false);
+	const hydrated = applyHydratedSession(createLoadedSession('latest content'));
 
 	assert.equal(hydrated.loaded, true);
 	assert.equal(hydrated.session.pages[0]?.content, 'latest content');

@@ -1,11 +1,12 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import {
+	applyRemotePageState,
 	createSession,
 	ensureValidActivePage,
 	type EditorPage,
 	type EditorSession,
 	UNTITLED_PAGE
-} from './session';
+} from '../core/session';
 
 export interface RemotePageRecord {
 	id: string;
@@ -13,6 +14,7 @@ export interface RemotePageRecord {
 	content: string;
 	created_at?: string;
 	updated_at?: string;
+	deleted_at?: string | null;
 }
 
 export interface RemoteAppState {
@@ -49,16 +51,37 @@ export function buildSessionFromRemote(remote: RemoteAppState): EditorSession {
 		return createSession();
 	}
 
-	const pages: EditorPage[] = remote.pages.map((page) => ({
-		id: page.id,
-		title: page.title,
-		content: page.content,
-		text: page.content,
-		selectionStart: 0,
-		selectionEnd: 0,
-		updatedAt: page.updated_at ?? page.created_at ?? new Date().toISOString(),
-		lastSyncedVersion: page.updated_at ?? page.created_at ?? null
-	}));
+	const pages: EditorPage[] = remote.pages.map((page) => {
+		const createdAt = page.created_at ?? page.updated_at ?? new Date().toISOString();
+		const updatedAt = page.updated_at ?? page.created_at ?? createdAt;
+		return applyRemotePageState(
+			{
+				id: page.id,
+				title: page.title,
+				content: page.content,
+				text: page.content,
+				selectionStart: 0,
+				selectionEnd: 0,
+				createdAt,
+				updatedAt: createdAt,
+				deletedAt: null,
+				lastSyncedAt: null,
+				lastSyncedTitle: null,
+				lastSyncedContent: null,
+				lastSyncedDeletedAt: null,
+				dirty: true,
+				syncStatus: 'local-only',
+				lastSyncedVersion: null
+			},
+			{
+				title: page.title,
+				content: page.content,
+				deletedAt: page.deleted_at ?? null,
+				createdAt,
+				updatedAt
+			}
+		);
+	});
 
 	const activePageId =
 		remote.activePageId && pages.some((page) => page.id === remote.activePageId)
@@ -97,7 +120,7 @@ export async function readRemoteSession(
 		await Promise.all([
 			supabase
 				.from('pages')
-				.select('id,title,content,created_at,updated_at')
+				.select('id,title,content,created_at,updated_at,deleted_at')
 				.eq('user_id', userId)
 				.order('created_at', { ascending: true }),
 			supabase.from('user_settings').select('active_page_id').eq('user_id', userId).maybeSingle()
@@ -127,12 +150,20 @@ export async function saveRemoteSession(
 	const currentRemotePages =
 		currentRemote?.pages ?? (await readRemoteSession(supabase, userId)).pages;
 	const remotePageMap = new Map(currentRemotePages.map((page) => [page.id, page]));
-	const existingIds = new Set(currentRemotePages.map((page) => page.id));
 	const remotePagesToSave = normalizedSession.pages.filter((page) => isRemotePageId(page.id));
-	const localPages = normalizedSession.pages.filter((page) => !isRemotePageId(page.id));
+	const localPages = normalizedSession.pages.filter(
+		(page) => !isRemotePageId(page.id) && shouldInsertLocalPage(normalizedSession, page)
+	);
 	const pagesToUpdate = remotePagesToSave.filter((page) => {
 		const currentPage = remotePageMap.get(page.id);
-		return !currentPage || currentPage.title !== page.title || currentPage.content !== page.content;
+		const currentDeletedAt = currentPage?.deleted_at ?? null;
+		const localDeletedAt = page.deletedAt ?? null;
+		return (
+			!currentPage ||
+			currentPage.title !== page.title ||
+			currentPage.content !== page.content ||
+			currentDeletedAt !== localDeletedAt
+		);
 	});
 
 	if (pagesToUpdate.length > 0) {
@@ -141,7 +172,9 @@ export async function saveRemoteSession(
 				id: page.id,
 				user_id: userId,
 				title: page.title,
-				content: page.content
+				content: page.content,
+				deleted_at: page.deletedAt ?? null,
+				updated_at: page.updatedAt
 			}))
 		);
 
@@ -151,16 +184,6 @@ export async function saveRemoteSession(
 	}
 
 	const pageIdMap = await insertPages(supabase, userId, localPages);
-	const retainedIds = new Set([...remotePagesToSave.map((page) => page.id), ...pageIdMap.values()]);
-	const deletedIds = [...existingIds].filter((id) => !retainedIds.has(id));
-
-	if (deletedIds.length > 0) {
-		const { error: deleteError } = await supabase.from('pages').delete().in('id', deletedIds);
-
-		if (deleteError) {
-			throw deleteError;
-		}
-	}
 
 	const activePageId =
 		pageIdMap.get(normalizedSession.activePageId) ?? normalizedSession.activePageId;
@@ -179,6 +202,22 @@ function isRemotePageId(id: string): boolean {
 	return UUID_PATTERN.test(id);
 }
 
+function shouldInsertLocalPage(session: EditorSession, page: EditorPage): boolean {
+	// The initial bootstrap note is a single, active, empty/untitled local-only page.
+	// Do not sync that placeholder until the user creates real content/notes.
+	const isBootstrapPlaceholder =
+		session.pages.length === 1 &&
+		session.activePageId === page.id &&
+		page.deletedAt === null &&
+		page.content.length === 0 &&
+		page.title === UNTITLED_PAGE &&
+		page.lastSyncedAt === null &&
+		page.lastSyncedVersion === null &&
+		page.syncStatus === 'local-only';
+
+	return !isBootstrapPlaceholder;
+}
+
 async function insertPages(
 	supabase: SupabaseClient,
 	userId: string,
@@ -192,7 +231,9 @@ async function insertPages(
 			.insert({
 				user_id: userId,
 				title: page.title,
-				content: page.content
+				content: page.content,
+				deleted_at: page.deletedAt ?? null,
+				updated_at: page.updatedAt
 			})
 			.select('id')
 			.single();

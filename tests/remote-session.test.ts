@@ -7,11 +7,12 @@ import {
 	hasSessionContent,
 	saveRemoteSession,
 	type RemoteAppState
-} from '../src/lib/editor/remote-session.ts';
-import { createPage, createSession } from '../src/lib/editor/session.ts';
+} from '../src/lib/editor/sync/remote-session.ts';
+import { createPage, createSession } from '../src/lib/editor/core/session.ts';
 
 class SupabaseStub {
 	pageUpserts: Array<unknown> = [];
+	pageInserts: Array<unknown> = [];
 	settingUpserts: Array<unknown> = [];
 	removedIds: Array<string[]> = [];
 
@@ -36,7 +37,7 @@ class SupabaseStub {
 					}
 				}),
 				insert: (value: unknown) => {
-					void value;
+					this.pageInserts.push(value);
 					return {
 						select: () => ({
 							single: async () => ({
@@ -119,12 +120,43 @@ test('applyPageIdMap replaces local ids with remote ids without dropping content
 
 test('saveRemoteSession repairs a missing active page before writing user settings', async () => {
 	const session = createSession();
+	session.pages[0]!.content = 'seed';
+	session.pages[0]!.text = 'seed';
+	session.pages[0]!.title = 'seed';
 	const result = await saveRemoteSession(new SupabaseStub() as never, 'user-a', {
 		...session,
 		activePageId: 'missing'
 	});
 
 	assert.equal(result.activePageId, 'f16d9a88-8e66-4db4-a0a5-8090c05690a2');
+});
+
+test('saveRemoteSession does not sync the initial bootstrap empty note', async () => {
+	const session = createSession();
+	const stub = new SupabaseStub();
+	const result = await saveRemoteSession(stub as never, 'user-a', session, {
+		activePageId: null,
+		pages: []
+	});
+
+	assert.equal(stub.pageInserts.length, 0);
+	assert.equal(result.pageIdMap.size, 0);
+	assert.equal(result.activePageId, null);
+});
+
+test('saveRemoteSession syncs an explicitly created empty untitled note', async () => {
+	const session = createSession();
+	const explicitNote = createPage('');
+	session.pages.push(explicitNote);
+	session.activePageId = explicitNote.id;
+	const stub = new SupabaseStub();
+	const result = await saveRemoteSession(stub as never, 'user-a', session, {
+		activePageId: null,
+		pages: []
+	});
+
+	assert.equal(stub.pageInserts.length > 0, true);
+	assert.equal(result.pageIdMap.has(explicitNote.id), true);
 });
 
 test('saveRemoteSession skips unchanged remote rows and only writes diffs', async () => {
@@ -140,7 +172,15 @@ test('saveRemoteSession skips unchanged remote rows and only writes diffs', asyn
 			text: 'remote body',
 			selectionStart: 0,
 			selectionEnd: 0,
+			createdAt: '2026-04-15T16:12:00.000Z',
 			updatedAt: '2026-04-15T16:12:00.000Z',
+			deletedAt: null,
+			lastSyncedAt: '2026-04-15T16:12:00.000Z',
+			lastSyncedTitle: 'Remote title',
+			lastSyncedContent: 'remote body',
+			lastSyncedDeletedAt: null,
+			dirty: false,
+			syncStatus: 'synced',
 			lastSyncedVersion: '2026-04-15T16:12:00.000Z'
 		},
 		createPage('local body')

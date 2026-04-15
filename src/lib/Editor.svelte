@@ -1,18 +1,18 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { buildDocument, type EditorDocument } from './editor/parser';
-	import { syncEditorDom } from './editor/dom';
-	import { extractText, getTextOffset, restoreTextOffset } from './editor/selection';
-	import { cutSelection, pasteText, writeSelectionToClipboard } from './editor/clipboard';
+	import { buildDocument, type EditorDocument } from './editor/basic/parser';
+	import { syncEditorDom } from './editor/basic/dom';
+	import { extractText, getTextOffset, restoreTextOffset } from './editor/basic/selection';
+	import { cutSelection, pasteText, writeSelectionToClipboard } from './editor/basic/clipboard';
 	import {
 		applyDeleteBackward,
 		applyDeleteForward,
 		applyEnterKey,
 		applyTabKey
-	} from './editor/commands';
-	import { EditorHistory, type EditorState } from './editor/history';
-	import { replaceRange } from './editor/text';
-	import { shouldApplyExternalState } from './editor/state-sync';
+	} from './editor/basic/commands';
+	import { EditorHistory, type EditorState } from './editor/basic/history';
+	import { replaceRange } from './editor/basic/text';
+	import { shouldApplyExternalState } from './editor/basic/state-sync';
 
 	export let initialState: EditorState = { text: '', selectionStart: 0, selectionEnd: 0 };
 	export let onChange: (state: EditorState) => void = () => {};

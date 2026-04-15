@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { shouldApplyExternalState } from '../src/lib/editor/state-sync.ts';
+import { shouldApplyExternalState } from '../src/lib/editor/basic/state-sync.ts';
 
 test('shouldApplyExternalState ignores echoed local editor state', () => {
 	const state = { text: 'alpha', selectionStart: 5, selectionEnd: 5 };

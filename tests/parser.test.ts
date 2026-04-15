@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildDocument, renderEditorLine, renderSelectionHtml } from '../src/lib/editor/parser.ts';
-import { normalizeOrderedListNumbers } from '../src/lib/editor/lists.ts';
+import { buildDocument, renderEditorLine, renderSelectionHtml } from '../src/lib/editor/basic/parser.ts';
+import { normalizeOrderedListNumbers } from '../src/lib/editor/basic/lists.ts';
 
 function getOnlyLine(source: string) {
 	const document = buildDocument(source);

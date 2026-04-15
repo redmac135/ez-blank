@@ -6,7 +6,7 @@ import {
 	ensureValidActivePage,
 	normalizeSession,
 	updatePageState
-} from '../src/lib/editor/session.ts';
+} from '../src/lib/editor/core/session.ts';
 
 test('normalizeSession migrates the legacy single-document state into one page', () => {
 	const session = normalizeSession({
@@ -66,7 +66,15 @@ test('ensureValidActivePage falls back to the first page when the active page is
 				text: 'alpha',
 				selectionStart: 0,
 				selectionEnd: 0,
+				createdAt: '2026-04-14T00:00:00.000Z',
 				updatedAt: '2026-04-14T00:00:00.000Z',
+				deletedAt: null,
+				lastSyncedAt: '2026-04-14T00:00:00.000Z',
+				lastSyncedTitle: 'A',
+				lastSyncedContent: 'alpha',
+				lastSyncedDeletedAt: null,
+				dirty: false,
+				syncStatus: 'synced',
 				lastSyncedVersion: null
 			}
 		]

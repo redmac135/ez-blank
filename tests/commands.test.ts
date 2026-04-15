@@ -5,7 +5,7 @@ import {
 	applyDeleteForward,
 	applyEnterKey,
 	applyTabKey
-} from '../src/lib/editor/commands.ts';
+} from '../src/lib/editor/basic/commands.ts';
 
 test('applyTabKey renumbers the whole ordered sublist when indenting a subset selection', () => {
 	const source = '1. one\n2. two\n3. three';
