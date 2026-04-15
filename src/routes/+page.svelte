@@ -82,6 +82,7 @@
 	let syncQueued = false;
 	let syncRetryTimeout: ReturnType<typeof setTimeout> | null = null;
 	let syncRetryDelayIndex = 0;
+	let networkOffline = browser ? !navigator.onLine : false;
 	let pendingAnonymousImportSession: EditorSession | null = null;
 	let currentAuthRequestId = 0;
 	let authSubscription: { unsubscribe: () => void } | null = null;
@@ -138,7 +139,7 @@
 	$: if (loaded) {
 		applyTheme(pageTheme);
 	}
-	$: isOffline = browser && loaded && !navigator.onLine;
+	$: isOffline = networkOffline || (browser && loaded && !navigator.onLine);
 	$: settingsStatusLabel = statusNotice
 		? statusNotice
 		: authUser
@@ -569,10 +570,11 @@
 		const syncedAt = new Date().toISOString();
 
 		try {
-			const remote = await readRemoteSession(supabase, saveUserId);
+			const remote = await withTimeout(readRemoteSession(supabase, saveUserId));
 			if (authUser?.id !== saveUserId) {
 				return;
 			}
+			networkOffline = false;
 
 			const meta = EditorStorage.loadUserSyncMeta(saveUserId);
 			const resolution = resolveVersionedSession(snapshot, remote, {
@@ -590,16 +592,17 @@
 				replacePageVersions: true
 			});
 
-			await saveRemoteSession(supabase, saveUserId, resolution.session, remote);
+			await withTimeout(saveRemoteSession(supabase, saveUserId, resolution.session, remote));
 
 			if (authUser?.id !== saveUserId) {
 				return;
 			}
 
-			const syncedRemote = await readRemoteSession(supabase, saveUserId);
+			const syncedRemote = await withTimeout(readRemoteSession(supabase, saveUserId));
 			if (authUser?.id !== saveUserId) {
 				return;
 			}
+			networkOffline = false;
 
 			replaceLocalSession(buildSessionFromRemote(syncedRemote), {
 				persist: true,
@@ -609,6 +612,7 @@
 			});
 		} catch (error) {
 			if (isNetworkFailure(error)) {
+				networkOffline = true;
 				authMessage = '';
 				startSyncRetryInterval();
 			} else {
@@ -793,6 +797,7 @@
 		}
 
 		if (navigator.onLine) {
+			networkOffline = false;
 			clearSyncRetryInterval();
 			if (authUser) {
 				scheduleRemoteSync();
@@ -800,6 +805,7 @@
 			return;
 		}
 
+		networkOffline = true;
 		if (authUser) {
 			startSyncRetryInterval();
 		}
@@ -911,7 +917,8 @@
 				replaceLocalSession(userLocal);
 			}
 
-			const remote = await readRemoteSession(supabase, nextUser.id);
+			const remote = await withTimeout(readRemoteSession(supabase, nextUser.id));
+			networkOffline = false;
 
 			if (currentAuthRequestId !== requestId) {
 				return;
@@ -956,6 +963,7 @@
 			loginModalOpen = false;
 		} catch (error) {
 			if (isNetworkFailure(error) && nextUser && !userLocal) {
+				networkOffline = true;
 				const fallbackSession = createSession();
 				replaceLocalSession(fallbackSession, {
 					persist: true,
@@ -1067,6 +1075,24 @@
 		}
 
 		return false;
+	}
+
+	function withTimeout<T>(promise: Promise<T>, timeoutMs = 8000): Promise<T> {
+		return new Promise<T>((resolve, reject) => {
+			const timeout = setTimeout(() => {
+				reject(new TypeError('Failed to fetch'));
+			}, timeoutMs);
+
+			promise
+				.then((value) => {
+					clearTimeout(timeout);
+					resolve(value);
+				})
+				.catch((error) => {
+					clearTimeout(timeout);
+					reject(error);
+				});
+		});
 	}
 </script>
 
