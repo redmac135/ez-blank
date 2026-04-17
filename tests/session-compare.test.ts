@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
 	areEditorSessionsEquivalent,
 	getChangedPageEvents
-} from '../src/lib/editor/sync/session-compare.ts';
+} from '../src/lib/editor/persistence/session-events.ts';
 import { createSession } from '../src/lib/editor/core/session.ts';
 
 test('areEditorSessionsEquivalent ignores selection-only differences', () => {

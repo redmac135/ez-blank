@@ -38,13 +38,6 @@ function createSession(activePageId = 'page-a'): EditorSession {
 	pageA.createdAt = '2026-04-14T00:00:00.000Z';
 	pageA.updatedAt = '2026-04-14T00:00:00.000Z';
 	pageA.deletedAt = null;
-	pageA.lastSyncedAt = '2026-04-14T00:00:00.000Z';
-	pageA.lastSyncedTitle = 'A';
-	pageA.lastSyncedContent = 'alpha';
-	pageA.lastSyncedDeletedAt = null;
-	pageA.dirty = false;
-	pageA.syncStatus = 'synced';
-	pageA.lastSyncedVersion = '2026-04-14T00:00:00.000Z';
 
 	const pageB = createPage('beta');
 	pageB.id = 'page-b';
@@ -52,13 +45,6 @@ function createSession(activePageId = 'page-a'): EditorSession {
 	pageB.createdAt = '2026-04-14T00:00:00.000Z';
 	pageB.updatedAt = '2026-04-14T00:00:00.000Z';
 	pageB.deletedAt = null;
-	pageB.lastSyncedAt = '2026-04-14T00:00:00.000Z';
-	pageB.lastSyncedTitle = 'B';
-	pageB.lastSyncedContent = 'beta';
-	pageB.lastSyncedDeletedAt = null;
-	pageB.dirty = false;
-	pageB.syncStatus = 'synced';
-	pageB.lastSyncedVersion = '2026-04-14T00:00:00.000Z';
 
 	return {
 		activePageId,
@@ -99,28 +85,6 @@ test('EditorStorage loads a single page without requiring full session consumers
 	const page = await EditorStorage.loadUserPage('user-a', 'page-b');
 	assert.equal(page?.id, 'page-b');
 	assert.equal(page?.content, 'beta');
-});
-
-test('EditorStorage loads default sync metadata when none exists', async () => {
-	assert.deepEqual(await EditorStorage.loadUserSyncMeta('user-a'), {
-		dirty: false,
-		lastSyncedAt: null,
-		pageVersions: {}
-	});
-});
-
-test('EditorStorage saves and loads user sync metadata', async () => {
-	await EditorStorage.saveUserSyncMeta('user-a', {
-		dirty: true,
-		lastSyncedAt: '2026-04-14T00:00:00.000Z',
-		pageVersions: { 'page-a': '2026-04-14T00:00:00.000Z' }
-	});
-
-	assert.deepEqual(await EditorStorage.loadUserSyncMeta('user-a'), {
-		dirty: true,
-		lastSyncedAt: '2026-04-14T00:00:00.000Z',
-		pageVersions: { 'page-a': '2026-04-14T00:00:00.000Z' }
-	});
 });
 
 test('EditorStorage migrates the legacy anonymous JSON session into the database', async () => {

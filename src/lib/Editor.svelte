@@ -16,6 +16,7 @@
 
 	export let initialState: EditorState = { text: '', selectionStart: 0, selectionEnd: 0 };
 	export let onChange: (state: EditorState) => void = () => {};
+	export let onFocusChange: (focused: boolean) => void = () => {};
 	export let spellcheckEnabled = true;
 
 	let text = initialState.text;
@@ -70,6 +71,15 @@
 		if (!editor) return;
 		const { start, end } = getTextOffset(editor, documentModel);
 		emitState(start, end);
+	}
+
+	function onFocusIn() {
+		onFocusChange(true);
+	}
+
+	function onFocusOut() {
+		reportSelection();
+		onFocusChange(false);
 	}
 
 	function onCopy(event: ClipboardEvent) {
@@ -250,7 +260,8 @@
 		on:paste={onPaste}
 		on:mouseup={reportSelection}
 		on:keyup={reportSelection}
-		on:focusout={reportSelection}
+		on:focusin={onFocusIn}
+		on:focusout={onFocusOut}
 		aria-label="Markdown editor"
 		role="textbox"
 		tabindex="0"

@@ -1,17 +1,5 @@
 import { createSession, normalizeSession, type EditorPage, type EditorSession } from '../core/session';
 
-export interface UserSyncMeta {
-	dirty: boolean;
-	lastSyncedAt: string | null;
-	pageVersions: Record<string, string | null>;
-}
-
-const DEFAULT_SYNC_META: UserSyncMeta = {
-	dirty: false,
-	lastSyncedAt: null,
-	pageVersions: {}
-};
-
 const DB_NAME = 'ez-blank-editor-storage';
 const DB_VERSION = 2;
 const KV_STORE_NAME = 'kv';
@@ -25,7 +13,6 @@ const USER_SCOPE_PREFIX = 'user:';
 export class EditorStorage {
 	public static ANONYMOUS_STATE_KEY = 'blank-state:anonymous';
 	public static USER_STATE_KEY_PREFIX = 'blank-state:user:';
-	public static USER_SYNC_META_KEY_PREFIX = 'blank-sync-meta:user:';
 	public static PROMPTED_USER_IDS_KEY = 'blank-anonymous-import-prompted-user-ids';
 
 	private static backendPromise: Promise<StorageBackend> | null = null;
@@ -38,10 +25,6 @@ export class EditorStorage {
 
 	static getUserStateKey(userId: string) {
 		return `${this.USER_STATE_KEY_PREFIX}${userId}`;
-	}
-
-	static getUserSyncMetaKey(userId: string) {
-		return `${this.USER_SYNC_META_KEY_PREFIX}${userId}`;
 	}
 
 	static async saveAnonymousState(session: EditorSession) {
@@ -82,35 +65,6 @@ export class EditorStorage {
 	static async loadUserPage(userId: string, pageId: string): Promise<EditorPage | null> {
 		const backend = await this.getBackend();
 		return backend.loadPage(buildUserScope(userId), pageId);
-	}
-
-	static async saveUserSyncMeta(userId: string, meta: UserSyncMeta) {
-		try {
-			const backend = await this.getBackend();
-			await backend.setKeyValue(this.getUserSyncMetaKey(userId), JSON.stringify(meta));
-		} catch (error) {
-			console.error('Failed to save user sync meta:', error);
-		}
-	}
-
-	static async loadUserSyncMeta(userId: string): Promise<UserSyncMeta> {
-		try {
-			const backend = await this.getBackend();
-			const stored = await backend.getKeyValue(this.getUserSyncMetaKey(userId));
-			if (!stored) {
-				return DEFAULT_SYNC_META;
-			}
-
-			const parsed = JSON.parse(stored);
-			return {
-				dirty: parsed?.dirty === true,
-				lastSyncedAt: typeof parsed?.lastSyncedAt === 'string' ? parsed.lastSyncedAt : null,
-				pageVersions: normalizePageVersions(parsed?.pageVersions)
-			};
-		} catch (error) {
-			console.error('Failed to load user sync meta:', error);
-			return DEFAULT_SYNC_META;
-		}
 	}
 
 	static async loadPromptedUserIds(): Promise<string[]> {
@@ -430,10 +384,7 @@ async function migrateLegacyLocalStorageState(backend: StorageBackend) {
 			continue;
 		}
 
-		if (
-			key === EditorStorage.PROMPTED_USER_IDS_KEY ||
-			key.startsWith(EditorStorage.USER_SYNC_META_KEY_PREFIX)
-		) {
+		if (key === EditorStorage.PROMPTED_USER_IDS_KEY) {
 			await backend.setKeyValue(key, value);
 			localStorage.removeItem(key);
 		}
@@ -465,18 +416,6 @@ function cloneSession(session: EditorSession): EditorSession {
 		activePageId: session.activePageId,
 		pages: session.pages.map((page) => ({ ...page }))
 	};
-}
-
-function normalizePageVersions(value: unknown): Record<string, string | null> {
-	if (!value || typeof value !== 'object') {
-		return {};
-	}
-
-	return Object.fromEntries(
-		Object.entries(value as Record<string, unknown>).filter(([, version]) => {
-			return typeof version === 'string' || version === null;
-		}) as Array<[string, string | null]>
-	);
 }
 
 function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {

@@ -1,7 +1,5 @@
 import type { EditorSession } from '../core/session';
 
-// Runtime helpers used by cross-tab and remote sync flow.
-
 export type LocalNoteEventType = 'note-updated' | 'title-updated' | 'new-note' | 'deleted-note';
 
 export interface ChangedPageEvent {
@@ -37,10 +35,6 @@ export function areEditorSessionsEquivalent(a: EditorSession, b: EditorSession):
 	}
 
 	return true;
-}
-
-export function getChangedPageIds(previousSession: EditorSession, nextSession: EditorSession): string[] {
-	return [...new Set(getChangedPageEvents(previousSession, nextSession).map((event) => event.id))];
 }
 
 export function getChangedPageEvents(
