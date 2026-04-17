@@ -1,11 +1,11 @@
 import type { EditorState } from '../basic/history';
 import {
 	ANONYMOUS_USERID,
-	type NoteRecord,
-	type NoteSyncStatus
+	type PageRecord,
+	type PageSyncStatus
 } from '../persistence/records';
 
-export interface EditorPage extends EditorState, NoteRecord {}
+export interface EditorPage extends EditorState, PageRecord {}
 
 export interface EditorSession {
 	pages: EditorPage[];
@@ -33,6 +33,7 @@ export function createPage(
 		id?: string;
 		userId?: string;
 		now?: string;
+		isEphemeral?: boolean;
 	} = {}
 ): EditorPage {
 	const timestamp = options.now ?? new Date().toISOString();
@@ -50,12 +51,13 @@ export function createPage(
 		lastSyncedAt: null,
 		lastKnownRemoteUpdatedAt: null,
 		lastKnownRemoteDeletedAt: null,
-		syncStatus: 'dirty'
+		syncStatus: 'dirty',
+		isEphemeral: options.isEphemeral ?? true
 	};
 }
 
 export function createSession(userId = ANONYMOUS_USERID): EditorSession {
-	const page = createPage('', { userId });
+	const page = createPage('', { userId, isEphemeral: true });
 	return {
 		pages: [page],
 		activePageId: page.id
@@ -111,7 +113,8 @@ export function updatePageState(page: EditorPage, state: EditorState): EditorPag
 		...nextPage,
 		title: shouldAutoDeriveTitle ? nextDerivedTitle : page.title,
 		updatedAt: new Date().toISOString(),
-		syncStatus: nextDirtyStatus(page.syncStatus)
+		syncStatus: nextDirtyStatus(page.syncStatus),
+		isEphemeral: false
 	};
 }
 
@@ -121,7 +124,8 @@ export function updatePageTitle(page: EditorPage, title: string): EditorPage {
 		...page,
 		title: trimmed.length > 0 ? trimmed.slice(0, 48) : UNTITLED_PAGE,
 		updatedAt: new Date().toISOString(),
-		syncStatus: nextDirtyStatus(page.syncStatus)
+		syncStatus: nextDirtyStatus(page.syncStatus),
+		isEphemeral: false
 	};
 }
 
@@ -130,19 +134,33 @@ export function markPageDeleted(page: EditorPage, deletedAt = new Date().toISOSt
 		...page,
 		deletedAt,
 		updatedAt: deletedAt,
-		syncStatus: nextDirtyStatus(page.syncStatus)
+		syncStatus: nextDirtyStatus(page.syncStatus),
+		isEphemeral: false
+	};
+}
+
+export function materializePage(page: EditorPage): EditorPage {
+	if (!page.isEphemeral) {
+		return page;
+	}
+
+	return {
+		...page,
+		updatedAt: new Date().toISOString(),
+		isEphemeral: false
 	};
 }
 
 export function clonePageForUser(page: EditorPage, userId: string): EditorPage {
-	const cloned = createPage(page.content, { userId });
+	const cloned = createPage(page.content, { userId, isEphemeral: false });
 	return {
 		...cloned,
 		title: page.title,
 		content: page.content,
 		text: page.content,
 		deletedAt: page.deletedAt,
-		syncStatus: 'dirty'
+		syncStatus: 'dirty',
+		isEphemeral: false
 	};
 }
 
@@ -188,7 +206,7 @@ export function normalizeSession(value: unknown, userId = ANONYMOUS_USERID): Edi
 }
 
 export function migrateLegacyState(state: EditorState, userId = ANONYMOUS_USERID): EditorSession {
-	const page = updatePageState(createPage(state.text, { userId }), state);
+	const page = updatePageState(createPage('', { userId, isEphemeral: true }), state);
 	return {
 		pages: [page],
 		activePageId: page.id
@@ -234,7 +252,8 @@ function normalizePage(value: unknown, index: number, userId: string): EditorPag
 		lastSyncedAt: readNullableTimestamp(value.lastSyncedAt),
 		lastKnownRemoteUpdatedAt: readNullableTimestamp(value.lastKnownRemoteUpdatedAt),
 		lastKnownRemoteDeletedAt: readNullableTimestamp(value.lastKnownRemoteDeletedAt),
-		syncStatus: normalizeSyncStatus(value.syncStatus)
+		syncStatus: normalizeSyncStatus(value.syncStatus),
+		isEphemeral: typeof value.isEphemeral === 'boolean' ? value.isEphemeral : false
 	};
 }
 
@@ -255,11 +274,11 @@ function createPageId() {
 		return crypto.randomUUID();
 	}
 
-	return `note-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
+	return `page-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
 }
 
 function createFallbackPageId(index: number) {
-	return `note-${index + 1}`;
+	return `page-${index + 1}`;
 }
 
 function readTimestamp(...values: unknown[]) {
@@ -282,11 +301,11 @@ function readNullableTimestamp(...values: unknown[]) {
 	return null;
 }
 
-function normalizeSyncStatus(value: unknown): NoteSyncStatus {
+function normalizeSyncStatus(value: unknown): PageSyncStatus {
 	return value === 'synced' || value === 'pending_push' || value === 'conflict' ? value : 'dirty';
 }
 
-function nextDirtyStatus(status: NoteSyncStatus): NoteSyncStatus {
+function nextDirtyStatus(status: PageSyncStatus): PageSyncStatus {
 	return status === 'conflict' ? 'conflict' : 'dirty';
 }
 

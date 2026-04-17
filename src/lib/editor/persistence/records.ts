@@ -1,14 +1,14 @@
 export const BLANK_DB_NAME = 'blank';
 export const BLANK_DB_VERSION = 1;
-export const NOTES_STORE_NAME = 'notes';
+export const PAGES_STORE_NAME = 'pages';
 export const SETTINGS_STORE_NAME = 'settings';
 export const USER_ID_INDEX = 'userId';
 
 export const ANONYMOUS_USERID = 'anonymous';
 
-export type NoteSyncStatus = 'synced' | 'dirty' | 'pending_push' | 'conflict';
+export type PageSyncStatus = 'synced' | 'dirty' | 'pending_push' | 'conflict';
 
-export interface NoteRecord {
+export interface PageRecord {
 	id: string;
 	userId: string;
 	title: string;
@@ -19,7 +19,8 @@ export interface NoteRecord {
 	lastSyncedAt: string | null;
 	lastKnownRemoteUpdatedAt: string | null;
 	lastKnownRemoteDeletedAt: string | null;
-	syncStatus: NoteSyncStatus;
+	syncStatus: PageSyncStatus;
+	isEphemeral: boolean;
 }
 
 export interface SettingRecord {

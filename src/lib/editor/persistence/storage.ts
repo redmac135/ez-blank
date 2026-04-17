@@ -11,7 +11,7 @@ import {
 	ANONYMOUS_USERID,
 	BLANK_DB_NAME,
 	BLANK_DB_VERSION,
-	NOTES_STORE_NAME,
+	PAGES_STORE_NAME,
 	SETTINGS_STORE_NAME,
 	SETTING_ACTIVE_PAGE_ID,
 	SETTING_HAS_PROMPTED_FOR_ANONYMOUS_IMPORT,
@@ -19,7 +19,7 @@ import {
 	SETTING_THEME,
 	SETTING_WORD_COUNT_VISIBILITY,
 	USER_ID_INDEX,
-	type NoteRecord,
+	type PageRecord,
 	type SettingRecord
 } from './records';
 
@@ -118,7 +118,8 @@ export class EditorStorage {
 
 	private static async getBackend(): Promise<StorageBackend> {
 		if (!this.backendPromise) {
-			this.backendPromise = typeof indexedDB === 'undefined' ? Promise.resolve(this.memoryBackend) : createIndexedDbBackend();
+			this.backendPromise =
+				typeof indexedDB === 'undefined' ? Promise.resolve(this.memoryBackend) : createIndexedDbBackend();
 		}
 
 		return this.backendPromise;
@@ -134,43 +135,46 @@ interface StorageBackend {
 }
 
 function createMemoryBackend(): StorageBackend {
-	const notes = new Map<string, NoteRecord>();
+	const pages = new Map<string, PageRecord>();
 	const settings = new Map<string, SettingRecord>();
 
 	return {
 		async saveSession(userId: string, session: EditorSession) {
 			const nextKeys = new Set(session.pages.map((page) => buildCompositeKey(userId, page.id)));
-			for (const key of [...notes.keys()]) {
+			for (const key of [...pages.keys()]) {
 				if (key.startsWith(`${userId}::`) && !nextKeys.has(key)) {
-					notes.delete(key);
+					pages.delete(key);
 				}
 			}
 
 			for (const page of session.pages) {
-				notes.set(buildCompositeKey(userId, page.id), toNoteRecord(page, userId));
+				pages.set(buildCompositeKey(userId, page.id), toPageRecord(page, userId));
 			}
 
-			settings.set(buildCompositeKey(userId, SETTING_ACTIVE_PAGE_ID), createSettingRecord(userId, SETTING_ACTIVE_PAGE_ID, session.activePageId));
+			settings.set(
+				buildCompositeKey(userId, SETTING_ACTIVE_PAGE_ID),
+				createSettingRecord(userId, SETTING_ACTIVE_PAGE_ID, session.activePageId)
+			);
 		},
 		async loadSession(userId: string) {
-			const userNotes = [...notes.values()]
-				.filter((note) => note.userId === userId)
-				.sort(compareNotes)
-				.map((note) => toEditorPage(note));
+			const userPages = [...pages.values()]
+				.filter((page) => page.userId === userId)
+				.sort(comparePages)
+				.map((page) => toEditorPage(page));
 
-			if (userNotes.length === 0) {
+			if (userPages.length === 0) {
 				return null;
 			}
 
 			const activePageId = settings.get(buildCompositeKey(userId, SETTING_ACTIVE_PAGE_ID))?.value;
 			return normalizeSession(
-				{ pages: userNotes, activePageId: typeof activePageId === 'string' ? activePageId : userNotes[0].id },
+				{ pages: userPages, activePageId: typeof activePageId === 'string' ? activePageId : userPages[0].id },
 				userId
 			);
 		},
 		async loadPage(userId: string, pageId: string) {
-			const note = notes.get(buildCompositeKey(userId, pageId));
-			return note ? toEditorPage(note) : null;
+			const page = pages.get(buildCompositeKey(userId, pageId));
+			return page ? toEditorPage(page) : null;
 		},
 		async getSetting<T>(userId: string, key: string) {
 			return settings.get(buildCompositeKey(userId, key))?.value as T | undefined;
@@ -186,60 +190,58 @@ async function createIndexedDbBackend(): Promise<StorageBackend> {
 
 	return {
 		async saveSession(userId: string, session: EditorSession) {
-			const tx = db.transaction([NOTES_STORE_NAME, SETTINGS_STORE_NAME], 'readwrite');
-			const notesStore = tx.objectStore(NOTES_STORE_NAME);
+			const tx = db.transaction([PAGES_STORE_NAME, SETTINGS_STORE_NAME], 'readwrite');
+			const pagesStore = tx.objectStore(PAGES_STORE_NAME);
 			const settingsStore = tx.objectStore(SETTINGS_STORE_NAME);
-			const userIndex = notesStore.index(USER_ID_INDEX);
-			const existing = await requestToPromise<NoteRecord[]>(userIndex.getAll(IDBKeyRange.only(userId)));
+			const userIndex = pagesStore.index(USER_ID_INDEX);
+			const existing = await requestToPromise<PageRecord[]>(userIndex.getAll(IDBKeyRange.only(userId)));
 			const nextIds = new Set(session.pages.map((page) => page.id));
 
-			for (const note of existing) {
-				if (!nextIds.has(note.id)) {
-					notesStore.delete([userId, note.id]);
+			for (const page of existing) {
+				if (!nextIds.has(page.id)) {
+					pagesStore.delete([userId, page.id]);
 				}
 			}
 
 			for (const page of session.pages) {
-				notesStore.put(toNoteRecord(page, userId));
+				pagesStore.put(toPageRecord(page, userId));
 			}
 
 			settingsStore.put(createSettingRecord(userId, SETTING_ACTIVE_PAGE_ID, session.activePageId));
 			await transactionToPromise(tx);
 		},
 		async loadSession(userId: string) {
-			const tx = db.transaction([NOTES_STORE_NAME, SETTINGS_STORE_NAME], 'readonly');
-			const notesStore = tx.objectStore(NOTES_STORE_NAME);
+			const tx = db.transaction([PAGES_STORE_NAME, SETTINGS_STORE_NAME], 'readonly');
+			const pagesStore = tx.objectStore(PAGES_STORE_NAME);
 			const settingsStore = tx.objectStore(SETTINGS_STORE_NAME);
-			const userIndex = notesStore.index(USER_ID_INDEX);
+			const userIndex = pagesStore.index(USER_ID_INDEX);
 
-			const [notes, activePageSetting] = await Promise.all([
-				requestToPromise<NoteRecord[]>(userIndex.getAll(IDBKeyRange.only(userId))),
+			const [pages, activePageSetting] = await Promise.all([
+				requestToPromise<PageRecord[]>(userIndex.getAll(IDBKeyRange.only(userId))),
 				requestToPromise<SettingRecord | undefined>(settingsStore.get([userId, SETTING_ACTIVE_PAGE_ID]))
 			]);
 			await transactionToPromise(tx);
 
-			if (notes.length === 0) {
+			if (pages.length === 0) {
 				return null;
 			}
 
 			return normalizeSession(
 				{
-					pages: notes.sort(compareNotes).map((note) => toEditorPage(note)),
+					pages: pages.sort(comparePages).map((page) => toEditorPage(page)),
 					activePageId:
-						typeof activePageSetting?.value === 'string'
-							? activePageSetting.value
-							: notes[0]!.id
+						typeof activePageSetting?.value === 'string' ? activePageSetting.value : pages[0]!.id
 				},
 				userId
 			);
 		},
 		async loadPage(userId: string, pageId: string) {
-			const tx = db.transaction(NOTES_STORE_NAME, 'readonly');
-			const note = await requestToPromise<NoteRecord | undefined>(
-				tx.objectStore(NOTES_STORE_NAME).get([userId, pageId])
+			const tx = db.transaction(PAGES_STORE_NAME, 'readonly');
+			const page = await requestToPromise<PageRecord | undefined>(
+				tx.objectStore(PAGES_STORE_NAME).get([userId, pageId])
 			);
 			await transactionToPromise(tx);
-			return note ? toEditorPage(note) : null;
+			return page ? toEditorPage(page) : null;
 		},
 		async getSetting<T>(userId: string, key: string) {
 			const tx = db.transaction(SETTINGS_STORE_NAME, 'readonly');
@@ -263,11 +265,11 @@ async function openDatabase(): Promise<IDBDatabase> {
 
 		request.onupgradeneeded = () => {
 			const db = request.result;
-			if (!db.objectStoreNames.contains(NOTES_STORE_NAME)) {
-				const notesStore = db.createObjectStore(NOTES_STORE_NAME, {
+			if (!db.objectStoreNames.contains(PAGES_STORE_NAME)) {
+				const pagesStore = db.createObjectStore(PAGES_STORE_NAME, {
 					keyPath: ['userId', 'id']
 				});
-				notesStore.createIndex(USER_ID_INDEX, 'userId', { unique: false });
+				pagesStore.createIndex(USER_ID_INDEX, 'userId', { unique: false });
 			}
 
 			if (!db.objectStoreNames.contains(SETTINGS_STORE_NAME)) {
@@ -287,7 +289,7 @@ function buildCompositeKey(left: string, right: string) {
 	return `${left}::${right}`;
 }
 
-function toNoteRecord(page: EditorPage, userId: string): NoteRecord {
+function toPageRecord(page: EditorPage, userId: string): PageRecord {
 	return {
 		id: page.id,
 		userId,
@@ -299,29 +301,32 @@ function toNoteRecord(page: EditorPage, userId: string): NoteRecord {
 		lastSyncedAt: page.lastSyncedAt,
 		lastKnownRemoteUpdatedAt: page.lastKnownRemoteUpdatedAt,
 		lastKnownRemoteDeletedAt: page.lastKnownRemoteDeletedAt,
-		syncStatus: page.syncStatus
+		syncStatus: page.syncStatus,
+		isEphemeral: page.isEphemeral
 	};
 }
 
-function toEditorPage(note: NoteRecord): EditorPage {
-	const page = createPage(note.content, {
-		id: note.id,
-		userId: note.userId,
-		now: note.createdAt
+function toEditorPage(page: PageRecord): EditorPage {
+	const nextPage = createPage(page.content, {
+		id: page.id,
+		userId: page.userId,
+		now: page.createdAt,
+		isEphemeral: page.isEphemeral
 	});
 
 	return {
-		...page,
-		title: note.title,
-		content: note.content,
-		text: note.content,
-		createdAt: note.createdAt,
-		updatedAt: note.updatedAt,
-		deletedAt: note.deletedAt,
-		lastSyncedAt: note.lastSyncedAt,
-		lastKnownRemoteUpdatedAt: note.lastKnownRemoteUpdatedAt,
-		lastKnownRemoteDeletedAt: note.lastKnownRemoteDeletedAt,
-		syncStatus: note.syncStatus
+		...nextPage,
+		title: page.title,
+		content: page.content,
+		text: page.content,
+		createdAt: page.createdAt,
+		updatedAt: page.updatedAt,
+		deletedAt: page.deletedAt,
+		lastSyncedAt: page.lastSyncedAt,
+		lastKnownRemoteUpdatedAt: page.lastKnownRemoteUpdatedAt,
+		lastKnownRemoteDeletedAt: page.lastKnownRemoteDeletedAt,
+		syncStatus: page.syncStatus,
+		isEphemeral: page.isEphemeral
 	};
 }
 
@@ -334,7 +339,7 @@ function createSettingRecord(userId: string, key: string, value: unknown): Setti
 	};
 }
 
-function compareNotes(left: NoteRecord, right: NoteRecord) {
+function comparePages(left: PageRecord, right: PageRecord) {
 	if (left.createdAt !== right.createdAt) {
 		return left.createdAt.localeCompare(right.createdAt);
 	}

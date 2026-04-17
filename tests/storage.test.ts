@@ -6,11 +6,21 @@ import { EditorStorage } from '../src/lib/editor/persistence/storage.ts';
 import { ANONYMOUS_USERID } from '../src/lib/editor/persistence/records.ts';
 
 function createSession(userId: string, activePageId = 'page-a'): EditorSession {
-	const pageA = createPage('alpha', { id: 'page-a', userId, now: '2026-04-14T00:00:00.000Z' });
+	const pageA = createPage('alpha', {
+		id: 'page-a',
+		userId,
+		now: '2026-04-14T00:00:00.000Z',
+		isEphemeral: false
+	});
 	pageA.title = 'A';
 	pageA.updatedAt = '2026-04-14T00:00:00.000Z';
 
-	const pageB = createPage('beta', { id: 'page-b', userId, now: '2026-04-15T00:00:00.000Z' });
+	const pageB = createPage('beta', {
+		id: 'page-b',
+		userId,
+		now: '2026-04-15T00:00:00.000Z',
+		isEphemeral: false
+	});
 	pageB.title = 'B';
 	pageB.updatedAt = '2026-04-15T00:00:00.000Z';
 
@@ -33,6 +43,7 @@ test('EditorStorage saves and loads anonymous state through the blank database s
 	assert.equal(loaded.activePageId, 'page-b');
 	assert.equal(loaded.pages.length, session.pages.length);
 	assert.equal(loaded.pages[0]?.userId, ANONYMOUS_USERID);
+	assert.equal(loaded.pages[0]?.isEphemeral, false);
 });
 
 test('EditorStorage saves and loads user-scoped state separately per account', async () => {
@@ -53,6 +64,7 @@ test('EditorStorage loads a single page without requiring full session consumers
 	assert.equal(page?.id, 'page-b');
 	assert.equal(page?.content, 'beta');
 	assert.equal(page?.userId, 'user-a');
+	assert.equal(page?.isEphemeral, false);
 });
 
 test('EditorStorage keeps page lookups in sync after hard removals are saved', async () => {
@@ -65,6 +77,17 @@ test('EditorStorage keeps page lookups in sync after hard removals are saved', a
 
 	const deletedPage = await EditorStorage.loadAnonymousPage('page-b');
 	assert.equal(deletedPage, null);
+});
+
+test('EditorStorage preserves ephemeral placeholders', async () => {
+	const session: EditorSession = {
+		activePageId: 'page-a',
+		pages: [createPage('', { id: 'page-a', userId: ANONYMOUS_USERID, isEphemeral: true })]
+	};
+	await EditorStorage.saveAnonymousState(session);
+
+	const loaded = await EditorStorage.loadAnonymousState();
+	assert.equal(loaded.pages[0]?.isEphemeral, true);
 });
 
 test('EditorStorage returns default preferences when no settings are stored', async () => {

@@ -38,7 +38,7 @@
 	} from '$lib/auth/session-vault';
 	import { EditorStorage } from '$lib/editor/persistence/storage';
 	import { ANONYMOUS_USERID } from '$lib/editor/persistence/records';
-	import { syncUserNotes } from '$lib/editor/sync';
+	import { fetchRemoteActivePageId, syncUserPages } from '$lib/editor/sync';
 	import { clearActiveSupabaseSession, getSupabaseClient } from '$lib/supabaseClient';
 	import {
 		clonePageForUser,
@@ -258,7 +258,7 @@
 	}
 
 	function addPage() {
-		const page = createPage('', { userId: getScopedUserId() });
+		const page = createPage('', { userId: getScopedUserId(), isEphemeral: false });
 		persistSession({
 			pages: [...session.pages, page],
 			activePageId: page.id
@@ -281,7 +281,7 @@
 		);
 		const nextVisiblePages = nextPages.filter((page) => page.deletedAt === null);
 		if (nextVisiblePages.length === 0) {
-			const replacementPage = createPage('', { userId: getScopedUserId() });
+			const replacementPage = createPage('', { userId: getScopedUserId(), isEphemeral: true });
 			nextPages.push(replacementPage);
 			persistSession({
 				pages: nextPages,
@@ -816,7 +816,21 @@
 			preferences = userPreferences;
 			applyTheme(preferences.themeMode);
 
-			const nextSession = userLocal ?? createSession(nextUser.id);
+			const baseSession = userLocal ?? createSession(nextUser.id);
+			const syncedSession =
+				supabase
+					? (await syncUserPages(supabase, nextUser.id, baseSession)).session
+					: baseSession;
+			const remoteActivePageId =
+				supabase ? await fetchRemoteActivePageId(supabase, nextUser.id) : null;
+			const nextSession =
+				remoteActivePageId &&
+				syncedSession.pages.some((page) => page.id === remoteActivePageId && page.deletedAt === null)
+					? {
+							...syncedSession,
+							activePageId: remoteActivePageId
+						}
+					: syncedSession;
 			if (!areEditorSessionsEquivalent(nextSession, session)) {
 				replaceLocalSession(mergeEditorSelections(nextSession, session));
 			}
@@ -1112,7 +1126,7 @@
 		authMessage = '';
 
 		try {
-			const result = await syncUserNotes(supabase, authUser.id, session);
+			const result = await syncUserPages(supabase, authUser.id, session);
 			replaceLocalSession(mergeEditorSelections(result.session, session), {
 				persist: true
 			});
