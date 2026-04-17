@@ -1,50 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EditorStorage } from '../src/lib/editor/persistence/storage.ts';
+import { DEFAULT_PREFERENCES } from '../src/lib/editor/core/preferences.ts';
 import { createPage, type EditorSession } from '../src/lib/editor/core/session.ts';
+import { EditorStorage } from '../src/lib/editor/persistence/storage.ts';
+import { ANONYMOUS_USERID } from '../src/lib/editor/persistence/records.ts';
 
-class MemoryStorage {
-	private values = new Map<string, string>();
-
-	get length() {
-		return this.values.size;
-	}
-
-	getItem(key: string) {
-		return this.values.get(key) ?? null;
-	}
-
-	key(index: number) {
-		return [...this.values.keys()][index] ?? null;
-	}
-
-	setItem(key: string, value: string) {
-		this.values.set(key, value);
-	}
-
-	removeItem(key: string) {
-		this.values.delete(key);
-	}
-
-	clear() {
-		this.values.clear();
-	}
-}
-
-function createSession(activePageId = 'page-a'): EditorSession {
-	const pageA = createPage('alpha');
-	pageA.id = 'page-a';
+function createSession(userId: string, activePageId = 'page-a'): EditorSession {
+	const pageA = createPage('alpha', { id: 'page-a', userId, now: '2026-04-14T00:00:00.000Z' });
 	pageA.title = 'A';
-	pageA.createdAt = '2026-04-14T00:00:00.000Z';
 	pageA.updatedAt = '2026-04-14T00:00:00.000Z';
-	pageA.deletedAt = null;
 
-	const pageB = createPage('beta');
-	pageB.id = 'page-b';
+	const pageB = createPage('beta', { id: 'page-b', userId, now: '2026-04-15T00:00:00.000Z' });
 	pageB.title = 'B';
-	pageB.createdAt = '2026-04-14T00:00:00.000Z';
-	pageB.updatedAt = '2026-04-14T00:00:00.000Z';
-	pageB.deletedAt = null;
+	pageB.updatedAt = '2026-04-15T00:00:00.000Z';
 
 	return {
 		activePageId,
@@ -54,56 +22,41 @@ function createSession(activePageId = 'page-a'): EditorSession {
 
 test.beforeEach(() => {
 	EditorStorage.resetForTests();
-	Object.defineProperty(globalThis, 'localStorage', {
-		value: new MemoryStorage(),
-		configurable: true
-	});
 });
 
-test('EditorStorage saves and loads anonymous state through the database', async () => {
-	const session = createSession('page-b');
+test('EditorStorage saves and loads anonymous state through the blank database shape', async () => {
+	const session = createSession(ANONYMOUS_USERID, 'page-b');
 
 	await EditorStorage.saveAnonymousState(session);
 
 	const loaded = await EditorStorage.loadAnonymousState();
 	assert.equal(loaded.activePageId, 'page-b');
 	assert.equal(loaded.pages.length, session.pages.length);
+	assert.equal(loaded.pages[0]?.userId, ANONYMOUS_USERID);
 });
 
 test('EditorStorage saves and loads user-scoped state separately per account', async () => {
-	await EditorStorage.saveUserState('user-a', createSession('page-a'));
-	await EditorStorage.saveUserState('user-b', createSession('page-b'));
+	await EditorStorage.saveUserState('user-a', createSession('user-a', 'page-a'));
+	await EditorStorage.saveUserState('user-b', createSession('user-b', 'page-b'));
 
 	assert.equal((await EditorStorage.loadUserState('user-a'))?.activePageId, 'page-a');
 	assert.equal((await EditorStorage.loadUserState('user-b'))?.activePageId, 'page-b');
+	assert.equal((await EditorStorage.loadUserState('user-a'))?.pages[0]?.userId, 'user-a');
+	assert.equal((await EditorStorage.loadUserState('user-b'))?.pages[0]?.userId, 'user-b');
 });
 
 test('EditorStorage loads a single page without requiring full session consumers', async () => {
-	const session = createSession('page-a');
+	const session = createSession('user-a', 'page-a');
 	await EditorStorage.saveUserState('user-a', session);
 
 	const page = await EditorStorage.loadUserPage('user-a', 'page-b');
 	assert.equal(page?.id, 'page-b');
 	assert.equal(page?.content, 'beta');
+	assert.equal(page?.userId, 'user-a');
 });
 
-test('EditorStorage migrates the legacy anonymous JSON session into the database', async () => {
-	localStorage.setItem(
-		EditorStorage.ANONYMOUS_STATE_KEY,
-		JSON.stringify({
-			pages: createSession('page-b').pages,
-			activePageId: 'page-b'
-		})
-	);
-
-	const session = await EditorStorage.loadAnonymousState();
-
-	assert.equal(session.activePageId, 'page-b');
-	assert.equal(localStorage.getItem(EditorStorage.ANONYMOUS_STATE_KEY), null);
-});
-
-test('EditorStorage keeps page lookups in sync after deletions are saved', async () => {
-	const session = createSession('page-a');
+test('EditorStorage keeps page lookups in sync after hard removals are saved', async () => {
+	const session = createSession(ANONYMOUS_USERID, 'page-a');
 	await EditorStorage.saveAnonymousState(session);
 	await EditorStorage.saveAnonymousState({
 		activePageId: 'page-a',
@@ -114,20 +67,30 @@ test('EditorStorage keeps page lookups in sync after deletions are saved', async
 	assert.equal(deletedPage, null);
 });
 
-test('EditorStorage tracks prompted user ids without duplicates', async () => {
-	assert.equal(await EditorStorage.hasPromptedUserId('user-a'), false);
-
-	await EditorStorage.markPromptedUserId('user-a');
-	await EditorStorage.markPromptedUserId('user-a');
-
-	assert.equal(await EditorStorage.hasPromptedUserId('user-a'), true);
-	assert.deepEqual(await EditorStorage.loadPromptedUserIds(), ['user-a']);
+test('EditorStorage returns default preferences when no settings are stored', async () => {
+	assert.deepEqual(await EditorStorage.loadPreferences(ANONYMOUS_USERID), DEFAULT_PREFERENCES);
 });
 
-test('EditorStorage ignores malformed prompted user id payloads', async () => {
-	localStorage.setItem(EditorStorage.PROMPTED_USER_IDS_KEY, JSON.stringify(['user-a', 42, null]));
+test('EditorStorage saves and loads preferences through settings records', async () => {
+	await EditorStorage.savePreferences('user-a', {
+		themeMode: 'dark',
+		spellcheckEnabled: false,
+		countVisibility: 'pinned'
+	});
 
-	assert.deepEqual(await EditorStorage.loadPromptedUserIds(), ['user-a']);
-	assert.equal(await EditorStorage.hasPromptedUserId('user-a'), true);
-	assert.equal(await EditorStorage.hasPromptedUserId('user-b'), false);
+	assert.deepEqual(await EditorStorage.loadPreferences('user-a'), {
+		themeMode: 'dark',
+		spellcheckEnabled: false,
+		countVisibility: 'pinned'
+	});
+});
+
+test('EditorStorage tracks whether an account has been prompted to import anonymous data', async () => {
+	assert.equal(await EditorStorage.hasPromptedForAnonymousImport('user-a'), false);
+
+	await EditorStorage.markPromptedForAnonymousImport('user-a');
+	await EditorStorage.markPromptedForAnonymousImport('user-a');
+
+	assert.equal(await EditorStorage.hasPromptedForAnonymousImport('user-a'), true);
+	assert.equal(await EditorStorage.hasPromptedForAnonymousImport('user-b'), false);
 });

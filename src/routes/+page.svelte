@@ -37,8 +37,11 @@
 		saveAuthSession
 	} from '$lib/auth/session-vault';
 	import { EditorStorage } from '$lib/editor/persistence/storage';
+	import { ANONYMOUS_USERID } from '$lib/editor/persistence/records';
+	import { syncUserNotes } from '$lib/editor/sync';
 	import { clearActiveSupabaseSession, getSupabaseClient } from '$lib/supabaseClient';
 	import {
+		clonePageForUser,
 		createPage,
 		createSession,
 		markPageDeleted,
@@ -48,7 +51,7 @@
 		updatePageTitle
 	} from '$lib/editor/core/session';
 
-	let session: EditorSession = createSession();
+	let session: EditorSession = createSession(ANONYMOUS_USERID);
 	let drawerOpen = false;
 	let loaded = false;
 	let menuPageId: string | null = null;
@@ -77,6 +80,7 @@
 	let currentAuthRequestId = 0;
 	let authSubscription: { unsubscribe: () => void } | null = null;
 	let suppressSavedSessionRemoval = false;
+	let syncBusy = false;
 
 	let titleInput: HTMLInputElement | null = null;
 	let countButton: HTMLButtonElement | null = null;
@@ -111,7 +115,6 @@
 
 	const TOP_REVEAL_HEIGHT = 112;
 	const CHROME_HIDE_DELAY = 1400;
-	const PREFERENCES_KEY = 'ez-blank-preferences-v1';
 	const APP_UPDATED_NOTICE_KEY = 'blank-app-updated-notice';
 
 	$: activePage = getActivePage(session);
@@ -170,7 +173,7 @@
 			return visiblePage;
 		}
 
-		return currentSession.pages[0] ?? createPage();
+		return currentSession.pages[0] ?? createPage('', { userId: getScopedUserId() });
 	}
 
 	function persistSession(nextSession: EditorSession) {
@@ -255,7 +258,7 @@
 	}
 
 	function addPage() {
-		const page = createPage();
+		const page = createPage('', { userId: getScopedUserId() });
 		persistSession({
 			pages: [...session.pages, page],
 			activePageId: page.id
@@ -278,7 +281,7 @@
 		);
 		const nextVisiblePages = nextPages.filter((page) => page.deletedAt === null);
 		if (nextVisiblePages.length === 0) {
-			const replacementPage = createPage();
+			const replacementPage = createPage('', { userId: getScopedUserId() });
 			nextPages.push(replacementPage);
 			persistSession({
 				pages: nextPages,
@@ -486,7 +489,7 @@
 	}
 
 	async function logout() {
-		if (authBusy) return;
+		if (authBusy || syncBusy) return;
 
 		authBusy = true;
 		authMessage = '';
@@ -500,12 +503,16 @@
 
 	async function resolveAnonymousImport(addAnonymousToAccount: boolean) {
 		if (authUser && pendingAnonymousImportSession) {
-			await EditorStorage.markPromptedUserId(authUser.id);
+			await EditorStorage.markPromptedForAnonymousImport(authUser.id);
 		}
 
 		if (addAnonymousToAccount && pendingAnonymousImportSession) {
+			const targetUserId = getScopedUserId(authUser?.id);
 			const nextSession: EditorSession = {
-				pages: [...session.pages, ...pendingAnonymousImportSession.pages],
+				pages: [
+					...session.pages,
+					...pendingAnonymousImportSession.pages.map((page) => clonePageForUser(page, targetUserId))
+				],
 				activePageId: session.activePageId
 			};
 
@@ -596,7 +603,7 @@
 
 	function updatePreferences(nextPreferences: EditorPreferences) {
 		preferences = nextPreferences;
-		savePreferences(nextPreferences);
+		void savePreferences(nextPreferences);
 	}
 
 	function toggleThemeMode() {
@@ -674,10 +681,14 @@
 
 	onMount(() => {
 		void (async () => {
-			const hydratedState = applyHydratedSession(await EditorStorage.loadAnonymousState());
+			const [anonymousSession, anonymousPreferences] = await Promise.all([
+				EditorStorage.loadAnonymousState(),
+				loadPreferences(ANONYMOUS_USERID)
+			]);
+			const hydratedState = applyHydratedSession(anonymousSession);
 			session = hydratedState.session;
 			loaded = hydratedState.loaded;
-			preferences = loadPreferences();
+			preferences = anonymousPreferences;
 			previousActiveText = getActivePage(session).content;
 			applyTheme(preferences.themeMode);
 			loadQueuedNotice();
@@ -699,22 +710,13 @@
 		authSubscription?.unsubscribe();
 	});
 
-	function loadPreferences(): EditorPreferences {
-		try {
-			const saved = localStorage.getItem(PREFERENCES_KEY);
-			return saved ? normalizePreferences(JSON.parse(saved)) : DEFAULT_PREFERENCES;
-		} catch (e) {
-			console.error('Failed to load editor preferences:', e);
-			return DEFAULT_PREFERENCES;
-		}
+	async function loadPreferences(userId = getScopedUserId()) {
+		const loadedPreferences = await EditorStorage.loadPreferences(userId);
+		return normalizePreferences(loadedPreferences);
 	}
 
-	function savePreferences(nextPreferences: EditorPreferences) {
-		try {
-			localStorage.setItem(PREFERENCES_KEY, JSON.stringify(nextPreferences));
-		} catch (e) {
-			console.error('Failed to save editor preferences:', e);
-		}
+	async function savePreferences(nextPreferences: EditorPreferences) {
+		await EditorStorage.savePreferences(getScopedUserId(), nextPreferences);
 	}
 
 	function applyTheme(themeMode: ThemeMode) {
@@ -783,7 +785,13 @@
 			pendingAnonymousImportSession = null;
 			importPromptOpen = false;
 			loginModalOpen = false;
-			replaceLocalSession(await EditorStorage.loadAnonymousState());
+			const [anonymousSession, anonymousPreferences] = await Promise.all([
+				EditorStorage.loadAnonymousState(),
+				loadPreferences(ANONYMOUS_USERID)
+			]);
+			preferences = anonymousPreferences;
+			applyTheme(preferences.themeMode);
+			replaceLocalSession(anonymousSession);
 			return;
 		}
 
@@ -791,10 +799,11 @@
 		authMessage = '';
 
 		try {
-			const [userLocal, anonymousSession, alreadyPrompted] = await Promise.all([
+			const [userLocal, anonymousSession, alreadyPrompted, userPreferences] = await Promise.all([
 				EditorStorage.loadUserState(nextUser.id),
 				EditorStorage.loadAnonymousState(),
-				EditorStorage.hasPromptedUserId(nextUser.id)
+				EditorStorage.hasPromptedForAnonymousImport(nextUser.id),
+				loadPreferences(nextUser.id)
 			]);
 			const hasAnonymousData = anonymousSession.pages.some(
 				(page) => page.deletedAt === null && (page.content.trim().length > 0 || page.title !== 'Untitled')
@@ -804,7 +813,10 @@
 				return;
 			}
 
-			const nextSession = userLocal ?? createSession();
+			preferences = userPreferences;
+			applyTheme(preferences.themeMode);
+
+			const nextSession = userLocal ?? createSession(nextUser.id);
 			if (!areEditorSessionsEquivalent(nextSession, session)) {
 				replaceLocalSession(mergeEditorSelections(nextSession, session));
 			}
@@ -831,15 +843,15 @@
 		previousSession: EditorSession,
 		nextSession: EditorSession
 	): Promise<ChangedPageEvent[]> {
-		const targetUserId = authUser?.id ?? null;
+		const targetUserId = getScopedUserId();
 		const sessionSnapshot: EditorSession = {
 			activePageId: nextSession.activePageId,
-			pages: nextSession.pages.map((page) => ({ ...page }))
+			pages: nextSession.pages.map((page) => ({ ...page, userId: targetUserId }))
 		};
 		const changedEvents = getChangedPageEvents(previousSession, sessionSnapshot);
 
 		await queueWorkspacePersist(async () => {
-			if (!targetUserId) {
+			if (targetUserId === ANONYMOUS_USERID) {
 				await EditorStorage.saveAnonymousState(sessionSnapshot);
 			} else {
 				await EditorStorage.saveUserState(targetUserId, sessionSnapshot);
@@ -902,12 +914,20 @@
 		notesChannel?.close();
 		notesChannel = new BroadcastChannel('notes');
 		notesChannel.onmessage = (event) => {
-			const message = event.data as { type?: unknown; id?: unknown } | null;
-			if (!message || typeof message.type !== 'string' || typeof message.id !== 'string') {
+			const message = event.data as { type?: unknown; id?: unknown; userId?: unknown } | null;
+			if (
+				!message ||
+				typeof message.type !== 'string' ||
+				typeof message.id !== 'string' ||
+				typeof message.userId !== 'string'
+			) {
 				return;
 			}
 
 			if (!LOCAL_NOTE_EVENT_TYPES.has(message.type as LocalNoteEventType)) {
+				return;
+			}
+			if (message.userId !== getScopedUserId()) {
 				return;
 			}
 
@@ -920,8 +940,9 @@
 			return;
 		}
 
+		const userId = getScopedUserId();
 		for (const event of events) {
-			notesChannel.postMessage({ type: event.type, id: event.id });
+			notesChannel.postMessage({ type: event.type, id: event.id, userId });
 		}
 	}
 
@@ -1077,6 +1098,40 @@
 
 		return fallback;
 	}
+
+	function getScopedUserId(userId: string | null = authUser?.id ?? null) {
+		return userId ?? ANONYMOUS_USERID;
+	}
+
+	async function syncNow() {
+		if (!supabase || !authUser || syncBusy || !loaded) {
+			return;
+		}
+
+		syncBusy = true;
+		authMessage = '';
+
+		try {
+			const result = await syncUserNotes(supabase, authUser.id, session);
+			replaceLocalSession(mergeEditorSelections(result.session, session), {
+				persist: true
+			});
+
+			if (result.conflictCount > 0) {
+				showStatusNotice(
+					result.conflictCount === 1
+						? 'Sync complete with 1 conflict fork'
+						: `Sync complete with ${result.conflictCount} conflict forks`
+				);
+			} else if (result.pushedCount > 0 || result.pulledCount > 0) {
+				showStatusNotice('Sync complete');
+			}
+		} catch (error) {
+			authMessage = getErrorMessage(error, 'Unable to sync notes.');
+		} finally {
+			syncBusy = false;
+		}
+	}
 </script>
 
 <svelte:window
@@ -1126,7 +1181,10 @@
 							{getCountVisibilityLabel(preferences.countVisibility)}
 						</button>
 						{#if authUser}
-							<button type="button" disabled={authBusy} on:click={logout}>Logout</button>
+							<button type="button" disabled={syncBusy} on:click={syncNow}>
+								{syncBusy ? 'Syncing…' : 'Sync now'}
+							</button>
+							<button type="button" disabled={authBusy || syncBusy} on:click={logout}>Logout</button>
 							<div class="menu-stat">{authUser.email ?? authUser.id}</div>
 						{:else}
 							<button

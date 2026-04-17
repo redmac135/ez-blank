@@ -1,13 +1,11 @@
 import type { EditorState } from '../basic/history';
+import {
+	ANONYMOUS_USERID,
+	type NoteRecord,
+	type NoteSyncStatus
+} from '../persistence/records';
 
-export interface EditorPage extends EditorState {
-	id: string;
-	title: string;
-	content: string;
-	createdAt: string;
-	updatedAt: string;
-	deletedAt: string | null;
-}
+export interface EditorPage extends EditorState, NoteRecord {}
 
 export interface EditorSession {
 	pages: EditorPage[];
@@ -29,23 +27,35 @@ export function derivePageTitle(content: string): string {
 	return firstLine.replace(/\s+/g, ' ').slice(0, 48);
 }
 
-export function createPage(content = '', id = createPageId()): EditorPage {
-	const createdAt = new Date().toISOString();
+export function createPage(
+	content = '',
+	options: {
+		id?: string;
+		userId?: string;
+		now?: string;
+	} = {}
+): EditorPage {
+	const timestamp = options.now ?? new Date().toISOString();
 	return {
-		id,
+		id: options.id ?? createPageId(),
+		userId: options.userId ?? ANONYMOUS_USERID,
 		title: derivePageTitle(content),
 		content,
 		text: content,
 		selectionStart: 0,
 		selectionEnd: 0,
-		createdAt,
-		updatedAt: createdAt,
-		deletedAt: null
+		createdAt: timestamp,
+		updatedAt: timestamp,
+		deletedAt: null,
+		lastSyncedAt: null,
+		lastKnownRemoteUpdatedAt: null,
+		lastKnownRemoteDeletedAt: null,
+		syncStatus: 'dirty'
 	};
 }
 
-export function createSession(): EditorSession {
-	const page = createPage();
+export function createSession(userId = ANONYMOUS_USERID): EditorSession {
+	const page = createPage('', { userId });
 	return {
 		pages: [page],
 		activePageId: page.id
@@ -100,7 +110,8 @@ export function updatePageState(page: EditorPage, state: EditorState): EditorPag
 	return {
 		...nextPage,
 		title: shouldAutoDeriveTitle ? nextDerivedTitle : page.title,
-		updatedAt: new Date().toISOString()
+		updatedAt: new Date().toISOString(),
+		syncStatus: nextDirtyStatus(page.syncStatus)
 	};
 }
 
@@ -109,7 +120,8 @@ export function updatePageTitle(page: EditorPage, title: string): EditorPage {
 	return {
 		...page,
 		title: trimmed.length > 0 ? trimmed.slice(0, 48) : UNTITLED_PAGE,
-		updatedAt: new Date().toISOString()
+		updatedAt: new Date().toISOString(),
+		syncStatus: nextDirtyStatus(page.syncStatus)
 	};
 }
 
@@ -117,15 +129,40 @@ export function markPageDeleted(page: EditorPage, deletedAt = new Date().toISOSt
 	return {
 		...page,
 		deletedAt,
-		updatedAt: deletedAt
+		updatedAt: deletedAt,
+		syncStatus: nextDirtyStatus(page.syncStatus)
 	};
 }
 
-export function normalizeSession(value: unknown): EditorSession | null {
+export function clonePageForUser(page: EditorPage, userId: string): EditorPage {
+	const cloned = createPage(page.content, { userId });
+	return {
+		...cloned,
+		title: page.title,
+		content: page.content,
+		text: page.content,
+		deletedAt: page.deletedAt,
+		syncStatus: 'dirty'
+	};
+}
+
+export function markPageDirty(page: EditorPage, userId = page.userId): EditorPage {
+	return {
+		...page,
+		userId,
+		updatedAt: new Date().toISOString(),
+		lastSyncedAt: null,
+		lastKnownRemoteUpdatedAt: null,
+		lastKnownRemoteDeletedAt: null,
+		syncStatus: page.syncStatus === 'conflict' ? 'conflict' : 'dirty'
+	};
+}
+
+export function normalizeSession(value: unknown, userId = ANONYMOUS_USERID): EditorSession | null {
 	if (!isRecord(value)) return null;
 
 	if (isLegacyEditorState(value)) {
-		return migrateLegacyState(value);
+		return migrateLegacyState(value, userId);
 	}
 
 	if (!Array.isArray(value.pages)) {
@@ -133,11 +170,12 @@ export function normalizeSession(value: unknown): EditorSession | null {
 	}
 
 	const pages = value.pages
-		.map((page, index) => normalizePage(page, index))
-		.filter((page): page is EditorPage => page !== null);
+		.map((page, index) => normalizePage(page, index, userId))
+		.filter((page): page is EditorPage => page !== null)
+		.sort(comparePages);
 
 	if (pages.length === 0) {
-		return createSession();
+		return createSession(userId);
 	}
 
 	const activePageId =
@@ -149,15 +187,15 @@ export function normalizeSession(value: unknown): EditorSession | null {
 	return ensureValidActivePage({ pages, activePageId });
 }
 
-export function migrateLegacyState(state: EditorState): EditorSession {
-	const page = updatePageState(createPage(state.text), state);
+export function migrateLegacyState(state: EditorState, userId = ANONYMOUS_USERID): EditorSession {
+	const page = updatePageState(createPage(state.text, { userId }), state);
 	return {
 		pages: [page],
 		activePageId: page.id
 	};
 }
 
-function normalizePage(value: unknown, index: number): EditorPage | null {
+function normalizePage(value: unknown, index: number, userId: string): EditorPage | null {
 	if (!isRecord(value)) return null;
 
 	const content =
@@ -175,27 +213,13 @@ function normalizePage(value: unknown, index: number): EditorPage | null {
 		typeof value.selectionEnd === 'number' ? value.selectionEnd : selectionStart,
 		normalizedContent.length
 	);
-	const createdAt =
-		typeof value.createdAt === 'string' && value.createdAt.length > 0
-			? value.createdAt
-			: typeof value.created_at === 'string' && value.created_at.length > 0
-				? value.created_at
-				: new Date().toISOString();
-	const updatedAt =
-		typeof value.updatedAt === 'string' && value.updatedAt.length > 0
-			? value.updatedAt
-			: typeof value.updated_at === 'string' && value.updated_at.length > 0
-				? value.updated_at
-				: createdAt;
-	const deletedAt =
-		typeof value.deletedAt === 'string'
-			? value.deletedAt
-			: typeof value.deleted_at === 'string'
-				? value.deleted_at
-				: null;
+	const createdAt = readTimestamp(value.createdAt, value.created_at);
+	const updatedAt = readTimestamp(value.updatedAt, value.updated_at) ?? createdAt;
+	const deletedAt = readNullableTimestamp(value.deletedAt, value.deleted_at);
 
 	return {
-		id: typeof value.id === 'string' && value.id.length > 0 ? value.id : `page-${index + 1}`,
+		id: typeof value.id === 'string' && value.id.length > 0 ? value.id : createFallbackPageId(index),
+		userId: typeof value.userId === 'string' && value.userId.length > 0 ? value.userId : userId,
 		title:
 			typeof value.title === 'string' && value.title.trim().length > 0
 				? value.title.trim()
@@ -206,7 +230,11 @@ function normalizePage(value: unknown, index: number): EditorPage | null {
 		selectionEnd,
 		createdAt,
 		updatedAt,
-		deletedAt
+		deletedAt,
+		lastSyncedAt: readNullableTimestamp(value.lastSyncedAt),
+		lastKnownRemoteUpdatedAt: readNullableTimestamp(value.lastKnownRemoteUpdatedAt),
+		lastKnownRemoteDeletedAt: readNullableTimestamp(value.lastKnownRemoteDeletedAt),
+		syncStatus: normalizeSyncStatus(value.syncStatus)
 	};
 }
 
@@ -223,5 +251,49 @@ function clampSelection(value: number, max: number) {
 }
 
 function createPageId() {
-	return `page-${Math.random().toString(36).slice(2, 10)}`;
+	if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+		return crypto.randomUUID();
+	}
+
+	return `note-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
+}
+
+function createFallbackPageId(index: number) {
+	return `note-${index + 1}`;
+}
+
+function readTimestamp(...values: unknown[]) {
+	for (const value of values) {
+		if (typeof value === 'string' && value.length > 0) {
+			return value;
+		}
+	}
+
+	return new Date().toISOString();
+}
+
+function readNullableTimestamp(...values: unknown[]) {
+	for (const value of values) {
+		if (typeof value === 'string') {
+			return value;
+		}
+	}
+
+	return null;
+}
+
+function normalizeSyncStatus(value: unknown): NoteSyncStatus {
+	return value === 'synced' || value === 'pending_push' || value === 'conflict' ? value : 'dirty';
+}
+
+function nextDirtyStatus(status: NoteSyncStatus): NoteSyncStatus {
+	return status === 'conflict' ? 'conflict' : 'dirty';
+}
+
+function comparePages(left: EditorPage, right: EditorPage) {
+	if (left.createdAt !== right.createdAt) {
+		return left.createdAt.localeCompare(right.createdAt);
+	}
+
+	return left.id.localeCompare(right.id);
 }
