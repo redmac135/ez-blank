@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createPage, type EditorSession } from '../src/lib/editor/core/session.ts';
-import { fetchRemoteActivePageId, forkConflictPage, syncUserPages } from '../src/lib/editor/sync.ts';
+import {
+	fetchRemoteActivePageId,
+	forkConflictPage,
+	isSyncInProgress,
+	syncUserPages
+} from '../src/lib/editor/sync.ts';
 import type { PageSyncStatus } from '../src/lib/editor/persistence/records.ts';
 
 type RemotePageRow = {
@@ -274,4 +279,72 @@ test('syncUserPages handles remote delete versus local edit by forking the local
 	assert.equal(result.session.pages[0]?.deletedAt, '2026-04-17T18:04:00.000Z');
 	assert.equal(result.session.pages[1]?.deletedAt, null);
 	assert.match(result.session.pages[1]?.title ?? '', /^Conflict \(Local conflict /);
+});
+
+test('syncUserPages rejects concurrent sync passes with the global guard', async () => {
+	let releaseSnapshot!: () => void;
+	const snapshotBlocked = new Promise<void>((resolve) => {
+		releaseSnapshot = resolve;
+	});
+
+	const supabase = {
+		from(table: string) {
+			if (table === 'pages') {
+				return {
+					select() {
+						return {
+							eq() {
+								return this;
+							},
+							order() {
+								return this;
+							},
+							then(resolve: (value: unknown) => unknown) {
+								return snapshotBlocked.then(() => resolve({ data: [], error: null }));
+							}
+						};
+					},
+					upsert(payload: RemotePageRow) {
+						return {
+							select() {
+								return {
+									async single() {
+										return { data: payload, error: null };
+									}
+								};
+							}
+						};
+					}
+				};
+			}
+
+			if (table === 'user_settings') {
+				return {
+					async upsert() {
+						return { error: null };
+					}
+				};
+			}
+
+			throw new Error(`Unexpected table ${table}`);
+		}
+	};
+
+	const local = createPage('local body', {
+		id: 'page-1',
+		userId: 'user-a',
+		now: '2026-04-17T18:00:00.000Z',
+		isEphemeral: false
+	});
+	const firstSync = syncUserPages(supabase as never, 'user-a', buildSession(local));
+	assert.equal(isSyncInProgress(), true);
+
+	await assert.rejects(
+		() => syncUserPages(supabase as never, 'user-a', buildSession(local)),
+		/Sync already in progress\./i
+	);
+
+	releaseSnapshot();
+	await firstSync;
+	assert.equal(isSyncInProgress(), false);
 });

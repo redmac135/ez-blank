@@ -60,7 +60,7 @@ test('areEditorSessionsEquivalent detects soft-delete changes', () => {
 	assert.equal(areEditorSessionsEquivalent(left, right), false);
 });
 
-test('getChangedPageEvents emits typed local note events', () => {
+test('getChangedPageEvents emits typed local page events', () => {
 	const previous = createSession();
 	const page = previous.pages[0]!;
 	page.id = 'note-1';
@@ -84,6 +84,6 @@ test('getChangedPageEvents emits typed local note events', () => {
 
 	const events = getChangedPageEvents(previous, next);
 	assert.equal(events.some((event) => event.type === 'title-updated' && event.id === 'note-1'), true);
-	assert.equal(events.some((event) => event.type === 'note-updated' && event.id === 'note-1'), true);
-	assert.equal(events.some((event) => event.type === 'new-note' && event.id === 'note-2'), true);
+	assert.equal(events.some((event) => event.type === 'page-updated' && event.id === 'note-1'), true);
+	assert.equal(events.some((event) => event.type === 'new-page' && event.id === 'note-2'), true);
 });
