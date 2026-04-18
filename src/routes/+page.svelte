@@ -207,35 +207,6 @@ let session: EditorSession = { pages: [], activePageId: '' };
 		return currentSession.pages[0] ?? createPage('', { userId: getScopedUserId() });
 	}
 
-	function logSessionDebug(event: string, details: Record<string, unknown> = {}) {
-		console.log('[debug][page]', event, {
-			activePageId: session.activePageId,
-			pageIds: session.pages.map((page) => page.id),
-			pages: session.pages.map((page) => ({
-				id: page.id,
-				title: page.title,
-				isEphemeral: page.isEphemeral,
-				deletedAt: page.deletedAt,
-				contentPreview: page.content.slice(0, 40)
-			})),
-			...details
-		});
-	}
-
-	function summarizeSession(nextSession: EditorSession) {
-		return {
-			activePageId: nextSession.activePageId,
-			pageIds: nextSession.pages.map((page) => page.id),
-			pages: nextSession.pages.map((page) => ({
-				id: page.id,
-				title: page.title,
-				isEphemeral: page.isEphemeral,
-				deletedAt: page.deletedAt,
-				contentPreview: page.content.slice(0, 20)
-			}))
-		};
-	}
-
 	function getSettledAppSyncStatus(currentSession: EditorSession): AppSyncStatus {
 		return deriveSettledAppSyncStatus(currentSession, isBrowserOnline());
 	}
@@ -252,13 +223,8 @@ let session: EditorSession = { pages: [], activePageId: '' };
 	function persistSession(nextSession: EditorSession) {
 		const normalizedSession = ensureValidActivePage(nextSession);
 		const previousSession = session;
-		logSessionDebug('persistSession:start', {
-			nextActivePageId: normalizedSession.activePageId,
-			nextPageIds: normalizedSession.pages.map((page) => page.id)
-		});
 		const transition = applySessionUpdate({ session, loaded }, normalizedSession);
 		session = transition.state.session;
-		logSessionDebug('persistSession:applied');
 		queueRemoteActivePageUpdate(previousSession, transition.state.session);
 		if (transition.persistedSession) {
 			void persistWorkspaceState(previousSession, transition.persistedSession);
@@ -274,13 +240,6 @@ let session: EditorSession = { pages: [], activePageId: '' };
 		} = {}
 	) {
 		const previousSession = session;
-		console.log('[debug][page] replaceLocalSession', {
-			source: options.source ?? 'unknown',
-			persist: options.persist ?? false,
-			current: summarizeSession(session),
-			next: summarizeSession(nextSession),
-			...options.details
-		});
 		session = ensureValidActivePage(nextSession);
 		queueRemoteActivePageUpdate(previousSession, session);
 		if (loaded && options.persist) {
@@ -290,10 +249,6 @@ let session: EditorSession = { pages: [], activePageId: '' };
 
 	function updateActivePage(update: PageEditorUpdate) {
 		if (!session.pages.some((page) => page.id === update.pageId)) {
-			logSessionDebug('updateActivePage:missing-page', {
-				updatePageId: update.pageId,
-				updateContentPreview: update.state.text.slice(0, 40)
-			});
 			return;
 		}
 
@@ -850,19 +805,12 @@ async function loadPreferences(userId = getScopedUserId()) {
 
 async function hydrateInitialLocalState(nextUser: User | null) {
 	authUser = nextUser;
-	console.log('[debug][page] hydrateInitialLocalState:start', {
-		userId: nextUser?.id ?? null
-	});
 
 	if (!nextUser) {
 		const [anonymousSession, anonymousPreferences] = await Promise.all([
 			EditorStorage.loadUserState(ANONYMOUS_USERID),
 			loadPreferences(ANONYMOUS_USERID)
 		]);
-		console.log('[debug][page] hydrateInitialLocalState:anonymous-loaded', {
-			hasSession: !!anonymousSession,
-			pageIds: anonymousSession?.pages.map((page) => page.id) ?? []
-		});
 		const hydratedState = applyHydratedSession(anonymousSession ?? createSession(ANONYMOUS_USERID));
 		session = hydratedState.session;
 		loaded = hydratedState.loaded;
@@ -875,12 +823,6 @@ async function hydrateInitialLocalState(nextUser: User | null) {
 		EditorStorage.loadUserState(nextUser.id),
 		loadPreferences(nextUser.id)
 	]);
-	console.log('[debug][page] hydrateInitialLocalState:user-loaded', {
-		userId: nextUser.id,
-		hasSession: !!userLocal,
-		pageIds: userLocal?.pages.map((page) => page.id) ?? [],
-		activePageId: userLocal?.activePageId ?? null
-	});
 	const hydratedState = applyHydratedSession(userLocal ?? createSession(nextUser.id));
 	session = hydratedState.session;
 	loaded = hydratedState.loaded;
@@ -965,10 +907,6 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 	async function syncAuthState(nextUser: User | null) {
 		const requestId = ++currentAuthRequestId;
 		authUser = nextUser;
-		console.log('[debug][page] syncAuthState:start', {
-			requestId,
-			userId: nextUser?.id ?? null
-		});
 
 		if (!nextUser) {
 			pendingAnonymousImportSession = null;
@@ -997,12 +935,6 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 				EditorStorage.hasPromptedForAnonymousImport(nextUser.id),
 				loadPreferences(nextUser.id)
 			]);
-			console.log('[debug][page] syncAuthState:loaded-local', {
-				requestId,
-				userId: nextUser.id,
-				userLocalPageIds: userLocal?.pages.map((page) => page.id) ?? [],
-				userLocalActivePageId: userLocal?.activePageId ?? null
-			});
 			const hasAnonymousData = anonymousSession.pages.some(
 				(page) => page.deletedAt === null && (page.content.trim().length > 0 || page.title !== 'Untitled')
 			);
@@ -1016,20 +948,10 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 
 			const baseSession = userLocal ?? createSession(nextUser.id);
 			let syncedSession = baseSession;
-			console.log('[debug][page] syncAuthState:baseSession', {
-				requestId,
-				activePageId: baseSession.activePageId,
-				pageIds: baseSession.pages.map((page) => page.id)
-			});
 			if (supabase) {
 				appSyncStatus = isBrowserOnline() ? 'syncing' : 'offline';
 				try {
 					syncedSession = (await syncUserPages(supabase, nextUser.id, baseSession)).session;
-					console.log('[debug][page] syncAuthState:syncedSession', {
-						requestId,
-						activePageId: syncedSession.activePageId,
-						pageIds: syncedSession.pages.map((page) => page.id)
-					});
 					appSyncStatus = getSettledAppSyncStatus(syncedSession);
 				} catch (error) {
 					appSyncStatus = isBrowserOnline() ? 'error' : 'offline';
@@ -1038,10 +960,6 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 			}
 			const remoteActivePageId =
 				supabase ? await fetchRemoteActivePageId(supabase, nextUser.id) : null;
-			console.log('[debug][page] syncAuthState:remoteActivePage', {
-				requestId,
-				remoteActivePageId
-			});
 			const shouldPreserveLocalEphemeralPage = hasVisibleEphemeralActivePage(syncedSession);
 			const nextSession =
 				!shouldPreserveLocalEphemeralPage &&
@@ -1052,11 +970,6 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 							activePageId: remoteActivePageId
 						}
 					: syncedSession;
-			console.log('[debug][page] syncAuthState:nextSession', {
-				requestId,
-				activePageId: nextSession.activePageId,
-				pageIds: nextSession.pages.map((page) => page.id)
-			});
 			if (!areEditorSessionsEquivalent(nextSession, session)) {
 				replaceLocalSession(mergeEditorSelections(nextSession, session), {
 					source: 'syncAuthState:nextSession',
@@ -1215,12 +1128,6 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 		const page = authUser
 			? await EditorStorage.loadUserPage(authUser.id, noteId)
 			: await EditorStorage.loadAnonymousPage(noteId);
-		console.log('[debug][page] refreshPageFromIndexedDb', {
-			eventType,
-			noteId,
-			found: !!page,
-			pagePreview: page ? { id: page.id, title: page.title, contentPreview: page.content.slice(0, 20) } : null
-		});
 		if (!page) {
 			if (eventType !== 'deleted-page') {
 				return;
@@ -1382,25 +1289,13 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 		authMessage = '';
 
 		try {
-			console.log('[debug][page] executeSync:start', summarizeSession(syncSourceSession));
 			const result = await syncUserPages(supabase, authUser.id, syncSourceSession);
-			console.log('[debug][page] executeSync:result', {
-				pushedCount: result.pushedCount,
-				pulledCount: result.pulledCount,
-				conflictCount: result.conflictCount,
-				session: summarizeSession(result.session)
-			});
 
 			if (!areEditorSessionsEquivalent(session, syncSourceSession)) {
 				const reconciledSession = reconcileSyncResult(session, syncSourceSession, result.session);
 				replaceLocalSession(mergeEditorSelections(reconciledSession, session), {
 					persist: true,
 					source: 'executeSync:reconciled-result'
-				});
-				console.log('[debug][page] executeSync:queueFollowUp', {
-					current: summarizeSession(session),
-					source: summarizeSession(syncSourceSession),
-					reconciled: summarizeSession(reconciledSession)
 				});
 				syncController.queueFollowUp(options);
 				return;

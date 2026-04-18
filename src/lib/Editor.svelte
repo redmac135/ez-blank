@@ -35,16 +35,6 @@
 	const TYPING_WINDOW = 750;
 	let isApplyingControlledEdit = false;
 
-	function logEditor(event: string, details: Record<string, unknown> = {}) {
-		console.log('[debug][editor]', event, {
-			pageId: instancePageId,
-			textPreview: text.slice(0, 40),
-			selectionStart,
-			selectionEnd,
-			...details
-		});
-	}
-
 	function commitText(nextText: string, nextSelectionStart?: number, nextSelectionEnd?: number) {
 		const previousDocument = documentModel;
 		const nextDocument = buildDocument(nextText);
@@ -89,12 +79,10 @@
 	}
 
 	function onFocusIn() {
-		logEditor('focusin');
 		onFocusChange(true);
 	}
 
 	function onFocusOut() {
-		logEditor('focusout-before-report');
 		reportSelection();
 		onFocusChange(false);
 	}
@@ -237,12 +225,6 @@
 	}
 
 	onMount(() => {
-		console.log('[debug][editor] mount', {
-			pageId: instancePageId,
-			initialTextPreview: initialState.text.slice(0, 40),
-			initialSelectionStart: initialState.selectionStart,
-			initialSelectionEnd: initialState.selectionEnd
-		});
 		editorHistory = new EditorHistory(
 			() => {
 				const { start, end } = getTextOffset(editor, documentModel);
@@ -258,30 +240,12 @@
 		applyState(initialState, true);
 		mounted = true;
 		editor.focus();
-
-		return () => {
-			console.log('[debug][editor] destroy', {
-				pageId: instancePageId,
-				textPreview: text.slice(0, 40),
-				selectionStart,
-				selectionEnd
-			});
-		};
 	});
 
 	$: if (
 		mounted &&
 		shouldApplyExternalState(initialState, { text, selectionStart, selectionEnd })
 	) {
-		console.log('[debug][editor] applyExternalState', {
-			pageId: instancePageId,
-			fromTextPreview: text.slice(0, 40),
-			toTextPreview: initialState.text.slice(0, 40),
-			fromSelectionStart: selectionStart,
-			fromSelectionEnd: selectionEnd,
-			toSelectionStart: initialState.selectionStart,
-			toSelectionEnd: initialState.selectionEnd
-		});
 		applyState(initialState);
 	}
 </script>

@@ -42,13 +42,6 @@ export function applyEditorStateUpdate(
 	editorUpdate: PageEditorUpdate
 ): PageAppTransition {
 	if (!state.session.pages.some((page) => page.id === editorUpdate.pageId)) {
-		console.log('[debug][app-state] ignore missing page update', {
-			pageId: editorUpdate.pageId,
-			activePageId: state.session.activePageId,
-			pageIds: state.session.pages.map((page) => page.id),
-			contentPreview: editorUpdate.state.text.slice(0, 40)
-		});
-
 		return {
 			state,
 			persistedSession: null
