@@ -14,6 +14,8 @@ export interface PageRecord {
 	userId: string;
 	title: string;
 	content: string;
+	selectionStart: number;
+	selectionEnd: number;
 	createdAt: string;
 	updatedAt: string;
 	deletedAt: string | null;

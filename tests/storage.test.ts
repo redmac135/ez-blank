@@ -91,6 +91,20 @@ test('EditorStorage preserves ephemeral placeholders', async () => {
 	assert.equal(loaded.pages[0]?.isEphemeral, true);
 });
 
+test('EditorStorage preserves selection offsets across local session reloads', async () => {
+	const session = createSession('user-a', 'page-b');
+	session.pages[1]!.selectionStart = 2;
+	session.pages[1]!.selectionEnd = 4;
+
+	await EditorStorage.saveUserState('user-a', session);
+
+	const loaded = await EditorStorage.loadUserState('user-a');
+	assert.equal(loaded?.activePageId, 'page-b');
+	assert.equal(loaded?.pages[0]?.id, 'page-b');
+	assert.equal(loaded?.pages[0]?.selectionStart, 2);
+	assert.equal(loaded?.pages[0]?.selectionEnd, 4);
+});
+
 test('EditorStorage returns default preferences when no settings are stored', async () => {
 	assert.deepEqual(await EditorStorage.loadPreferences(ANONYMOUS_USERID), DEFAULT_PREFERENCES);
 });
