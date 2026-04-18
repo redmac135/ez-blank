@@ -9,6 +9,10 @@
 	import Icon from '$lib/Icon.svelte';
 	import Modal from '$lib/Modal.svelte';
 	import OtpInput from '$lib/OtpInput.svelte';
+	import {
+		getSettledAppSyncStatus as deriveSettledAppSyncStatus,
+		type AppSyncStatus
+	} from '$lib/editor/app-sync-status';
 	import { createActivePageController } from '$lib/editor/active-page-controller';
 	import {
 		applyEditorStateUpdate,
@@ -40,7 +44,12 @@
 	} from '$lib/auth/session-vault';
 	import { EditorStorage } from '$lib/editor/persistence/storage';
 	import { ANONYMOUS_USERID } from '$lib/editor/persistence/records';
-	import { fetchRemoteActivePageId, pushRemoteActivePageId, syncUserPages } from '$lib/editor/sync';
+	import {
+		fetchRemoteActivePageId,
+		pushRemoteActivePageId,
+		reconcileSyncResult,
+		syncUserPages
+	} from '$lib/editor/sync';
 	import { clearActiveSupabaseSession, getSupabaseClient } from '$lib/supabaseClient';
 	import {
 		clonePageForUser,
@@ -53,11 +62,9 @@
 		sortPagesByRecency,
 		materializePage,
 		type EditorPage,
-		type EditorSession,
-		updatePageTitle
+	type EditorSession,
+	updatePageTitle
 	} from '$lib/editor/core/session';
-
-type AppSyncStatus = 'offline' | 'syncing' | 'synced' | 'saved_locally' | 'error';
 
 let session: EditorSession = { pages: [], activePageId: '' };
 	let drawerOpen = false;
@@ -227,6 +234,10 @@ let session: EditorSession = { pages: [], activePageId: '' };
 				contentPreview: page.content.slice(0, 20)
 			}))
 		};
+	}
+
+	function getSettledAppSyncStatus(currentSession: EditorSession): AppSyncStatus {
+		return deriveSettledAppSyncStatus(currentSession, isBrowserOnline());
 	}
 
 	function queueRemoteActivePageUpdate(previousSession: EditorSession, nextSession: EditorSession) {
@@ -856,7 +867,7 @@ async function hydrateInitialLocalState(nextUser: User | null) {
 		session = hydratedState.session;
 		loaded = hydratedState.loaded;
 		preferences = anonymousPreferences;
-		appSyncStatus = isBrowserOnline() ? 'synced' : 'offline';
+		appSyncStatus = getSettledAppSyncStatus(session);
 		return;
 	}
 
@@ -874,7 +885,7 @@ async function hydrateInitialLocalState(nextUser: User | null) {
 	session = hydratedState.session;
 	loaded = hydratedState.loaded;
 	preferences = userPreferences;
-	appSyncStatus = isBrowserOnline() ? 'synced' : 'offline';
+	appSyncStatus = getSettledAppSyncStatus(session);
 }
 
 async function savePreferences(nextPreferences: EditorPreferences) {
@@ -963,7 +974,7 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 			pendingAnonymousImportSession = null;
 			importPromptOpen = false;
 			loginModalOpen = false;
-			appSyncStatus = isBrowserOnline() ? 'synced' : 'offline';
+			appSyncStatus = getSettledAppSyncStatus(session);
 			const [anonymousSession, anonymousPreferences] = await Promise.all([
 				EditorStorage.loadAnonymousState(),
 				loadPreferences(ANONYMOUS_USERID)
@@ -1019,7 +1030,7 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 						activePageId: syncedSession.activePageId,
 						pageIds: syncedSession.pages.map((page) => page.id)
 					});
-					appSyncStatus = 'synced';
+					appSyncStatus = getSettledAppSyncStatus(syncedSession);
 				} catch (error) {
 					appSyncStatus = isBrowserOnline() ? 'error' : 'offline';
 					throw error;
@@ -1326,7 +1337,7 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 			return;
 		}
 
-		appSyncStatus = isBrowserOnline() ? 'saved_locally' : 'offline';
+		appSyncStatus = getSettledAppSyncStatus(session);
 	}
 
 	function getSyncStatusLabel(status: AppSyncStatus) {
@@ -1381,9 +1392,15 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 			});
 
 			if (!areEditorSessionsEquivalent(session, syncSourceSession)) {
+				const reconciledSession = reconcileSyncResult(session, syncSourceSession, result.session);
+				replaceLocalSession(mergeEditorSelections(reconciledSession, session), {
+					persist: true,
+					source: 'executeSync:reconciled-result'
+				});
 				console.log('[debug][page] executeSync:queueFollowUp', {
 					current: summarizeSession(session),
-					source: summarizeSession(syncSourceSession)
+					source: summarizeSession(syncSourceSession),
+					reconciled: summarizeSession(reconciledSession)
 				});
 				syncController.queueFollowUp(options);
 				return;
@@ -1403,7 +1420,7 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 			} else if (options.showSuccessNotice && (result.pushedCount > 0 || result.pulledCount > 0)) {
 				showStatusNotice('Sync complete');
 			}
-			appSyncStatus = 'synced';
+			appSyncStatus = getSettledAppSyncStatus(session);
 		} catch (error) {
 			appSyncStatus = isBrowserOnline() ? 'error' : 'offline';
 			authMessage = getErrorMessage(error, 'Unable to sync pages.');
@@ -1417,7 +1434,7 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 	}
 
 	function handleWindowOnline() {
-		appSyncStatus = 'saved_locally';
+		appSyncStatus = getSettledAppSyncStatus(session);
 		requestImmediateSync();
 	}
 

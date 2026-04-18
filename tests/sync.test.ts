@@ -5,6 +5,7 @@ import {
 	fetchRemoteActivePageId,
 	forkConflictPage,
 	isSyncInProgress,
+	reconcileSyncResult,
 	syncUserPages
 } from '../src/lib/editor/sync.ts';
 import type { PageSyncStatus } from '../src/lib/editor/persistence/records.ts';
@@ -245,6 +246,94 @@ test('syncUserPages ignores remote-only pages that are already deleted', async (
 	assert.equal(result.pulledCount, 0);
 	assert.equal(result.session.pages.length, 1);
 	assert.equal(result.session.pages[0]?.isEphemeral, true);
+});
+
+test('reconcileSyncResult advances sync metadata without discarding newer local edits', () => {
+	const source = createPage('alpha', {
+		id: 'page-1',
+		userId: 'user-a',
+		now: '2026-04-17T18:00:00.000Z',
+		isEphemeral: false
+	});
+	source.title = 'Alpha';
+	source.updatedAt = '2026-04-17T18:01:00.000Z';
+	source.lastSyncedAt = '2026-04-17T18:00:00.000Z';
+	source.lastKnownRemoteUpdatedAt = '2026-04-17T18:00:00.000Z';
+	source.lastKnownRemoteDeletedAt = null;
+	source.syncStatus = 'dirty' as PageSyncStatus;
+
+	const current = {
+		...source,
+		content: 'alpha beta',
+		text: 'alpha beta',
+		title: 'Alpha beta',
+		updatedAt: '2026-04-17T18:02:00.000Z',
+		syncStatus: 'dirty' as PageSyncStatus
+	};
+
+	const synced = {
+		...source,
+		lastSyncedAt: '2026-04-17T18:01:00.000Z',
+		lastKnownRemoteUpdatedAt: '2026-04-17T18:01:00.000Z',
+		syncStatus: 'synced' as PageSyncStatus
+	};
+
+	const result = reconcileSyncResult(buildSession(current), buildSession(source), buildSession(synced));
+
+	assert.equal(result.pages[0]?.content, 'alpha beta');
+	assert.equal(result.pages[0]?.title, 'Alpha beta');
+	assert.equal(result.pages[0]?.lastSyncedAt, '2026-04-17T18:01:00.000Z');
+	assert.equal(result.pages[0]?.lastKnownRemoteUpdatedAt, '2026-04-17T18:01:00.000Z');
+	assert.equal(result.pages[0]?.syncStatus, 'dirty');
+});
+
+test('reconcileSyncResult appends new synced pages while preserving current local pages', () => {
+	const source = createPage('alpha', {
+		id: 'page-1',
+		userId: 'user-a',
+		now: '2026-04-17T18:00:00.000Z',
+		isEphemeral: false
+	});
+	source.title = 'Alpha';
+	source.updatedAt = '2026-04-17T18:01:00.000Z';
+
+	const current = {
+		...source,
+		content: 'alpha beta',
+		text: 'alpha beta',
+		title: 'Alpha beta',
+		updatedAt: '2026-04-17T18:02:00.000Z',
+		syncStatus: 'dirty' as PageSyncStatus
+	};
+
+	const conflictFork = createPage('fork body', {
+		id: 'page-fork',
+		userId: 'user-a',
+		now: '2026-04-17T18:03:00.000Z',
+		isEphemeral: false
+	});
+	conflictFork.title = 'Fork';
+	conflictFork.updatedAt = '2026-04-17T18:03:00.000Z';
+	conflictFork.lastSyncedAt = '2026-04-17T18:03:00.000Z';
+	conflictFork.lastKnownRemoteUpdatedAt = '2026-04-17T18:03:00.000Z';
+	conflictFork.lastKnownRemoteDeletedAt = null;
+	conflictFork.syncStatus = 'synced' as PageSyncStatus;
+
+	const synced = {
+		...source,
+		lastSyncedAt: '2026-04-17T18:01:00.000Z',
+		lastKnownRemoteUpdatedAt: '2026-04-17T18:01:00.000Z',
+		syncStatus: 'synced' as PageSyncStatus
+	};
+
+	const result = reconcileSyncResult(
+		buildSession(current),
+		buildSession(source),
+		{ pages: [synced, conflictFork], activePageId: current.id }
+	);
+
+	assert.equal(result.pages.some((page) => page.id === 'page-1' && page.content === 'alpha beta'), true);
+	assert.equal(result.pages.some((page) => page.id === 'page-fork' && page.content === 'fork body'), true);
 });
 
 test('syncUserPages forks when local and remote both changed', async () => {

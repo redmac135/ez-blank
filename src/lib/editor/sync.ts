@@ -38,6 +38,56 @@ export function isSyncInProgress() {
 	return syncInProgress;
 }
 
+export function reconcileSyncResult(
+	currentSession: EditorSession,
+	syncSourceSession: EditorSession,
+	syncedSession: EditorSession
+): EditorSession {
+	const sourceById = new Map(syncSourceSession.pages.map((page) => [page.id, page]));
+	const syncedById = new Map(syncedSession.pages.map((page) => [page.id, page]));
+	const mergedPages: EditorPage[] = [];
+	const seenPageIds = new Set<string>();
+
+	for (const currentPage of currentSession.pages) {
+		const sourcePage = sourceById.get(currentPage.id) ?? null;
+		const syncedPage = syncedById.get(currentPage.id) ?? null;
+
+		if (!sourcePage || !syncedPage) {
+			mergedPages.push(currentPage);
+			seenPageIds.add(currentPage.id);
+			continue;
+		}
+
+		if (!hasPageChangedSinceSource(currentPage, sourcePage)) {
+			mergedPages.push(preserveLocalSelection(syncedPage, currentPage));
+			seenPageIds.add(currentPage.id);
+			continue;
+		}
+
+		if (pageStatesMatch(sourcePage, toRemoteShape(syncedPage))) {
+			mergedPages.push(mergeSyncedBaselineIntoCurrentPage(currentPage, syncedPage));
+			seenPageIds.add(currentPage.id);
+			continue;
+		}
+
+		mergedPages.push(currentPage);
+		seenPageIds.add(currentPage.id);
+	}
+
+	for (const syncedPage of syncedSession.pages) {
+		if (seenPageIds.has(syncedPage.id)) {
+			continue;
+		}
+
+		mergedPages.push(syncedPage);
+	}
+
+	return ensureValidActivePage({
+		pages: sortPages(mergedPages),
+		activePageId: currentSession.activePageId
+	});
+}
+
 // One manual sync pass works against one remote snapshot.
 // We pull once, decide everything against that snapshot, trust write responses,
 // and only then build the next local session.
@@ -273,6 +323,55 @@ function toSyncedLocalPage(remote: RemotePageRow, localPage: EditorPage | null):
 		lastKnownRemoteDeletedAt: remote.deleted_at,
 		syncStatus: 'synced',
 		isEphemeral: false
+	};
+}
+
+function preserveLocalSelection(page: EditorPage, selectionSource: EditorPage): EditorPage {
+	return {
+		...page,
+		selectionStart: Math.max(0, Math.min(selectionSource.selectionStart, page.content.length)),
+		selectionEnd: Math.max(0, Math.min(selectionSource.selectionEnd, page.content.length))
+	};
+}
+
+function toRemoteShape(page: EditorPage): RemotePageRow {
+	return {
+		id: page.id,
+		user_id: page.userId,
+		title: page.title,
+		content: page.content,
+		created_at: page.createdAt,
+		updated_at: page.updatedAt,
+		deleted_at: page.deletedAt
+	};
+}
+
+function hasPageChangedSinceSource(currentPage: EditorPage, sourcePage: EditorPage) {
+	return (
+		currentPage.title !== sourcePage.title ||
+		currentPage.content !== sourcePage.content ||
+		currentPage.deletedAt !== sourcePage.deletedAt ||
+		currentPage.updatedAt !== sourcePage.updatedAt ||
+		currentPage.isEphemeral !== sourcePage.isEphemeral
+	);
+}
+
+function mergeSyncedBaselineIntoCurrentPage(currentPage: EditorPage, syncedPage: EditorPage): EditorPage {
+	const nextPage: EditorPage = {
+		...currentPage,
+		userId: syncedPage.userId,
+		createdAt: syncedPage.createdAt,
+		lastSyncedAt: syncedPage.lastSyncedAt,
+		lastKnownRemoteUpdatedAt: syncedPage.lastKnownRemoteUpdatedAt,
+		lastKnownRemoteDeletedAt: syncedPage.lastKnownRemoteDeletedAt
+	};
+
+	return {
+		...nextPage,
+		syncStatus:
+			syncedPage.lastSyncedAt !== null && latestLocalMutationAt(nextPage) > syncedPage.lastSyncedAt
+				? 'dirty'
+				: 'synced'
 	};
 }
 
