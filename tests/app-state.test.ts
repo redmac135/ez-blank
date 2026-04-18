@@ -6,7 +6,7 @@ import {
 	applySessionUpdate,
 	type PageAppState
 } from '../src/lib/editor/core/app-state.ts';
-import { createSession } from '../src/lib/editor/core/session.ts';
+import { createPage, createSession } from '../src/lib/editor/core/session.ts';
 
 function createLoadedSession(text: string) {
 	const session = createSession();
@@ -25,9 +25,12 @@ test('applyEditorStateUpdate does not persist changes before hydration completes
 	};
 
 	const transition = applyEditorStateUpdate(initialState, {
-		text: '',
-		selectionStart: 0,
-		selectionEnd: 0
+		pageId: initialState.session.activePageId,
+		state: {
+			text: '',
+			selectionStart: 0,
+			selectionEnd: 0
+		}
 	});
 
 	assert.equal(transition.persistedSession, null);
@@ -41,9 +44,12 @@ test('hydration after a pre-load empty editor update restores the stored content
 	};
 
 	const preHydrationEdit = applyEditorStateUpdate(initialState, {
-		text: '',
-		selectionStart: 0,
-		selectionEnd: 0
+		pageId: initialState.session.activePageId,
+		state: {
+			text: '',
+			selectionStart: 0,
+			selectionEnd: 0
+		}
 	});
 	assert.equal(preHydrationEdit.state.loaded, false);
 	const hydrated = applyHydratedSession(createLoadedSession('latest content'));
@@ -64,4 +70,55 @@ test('applySessionUpdate persists only after hydration completes', () => {
 
 	assert.equal(transition.persistedSession, nextSession);
 	assert.equal(transition.state.session.pages[0]?.content, 'beta');
+});
+
+test('applyEditorStateUpdate updates the targeted page even when it is not active', () => {
+	const session = createSession('user-a');
+	const secondPage = createPage('beta', {
+		id: 'page-b',
+		userId: 'user-a',
+		now: '2026-04-17T18:00:00.000Z',
+		isEphemeral: false
+	});
+	secondPage.title = 'Beta';
+
+	const state: PageAppState = {
+		session: {
+			activePageId: session.pages[0]!.id,
+			pages: [session.pages[0]!, secondPage]
+		},
+		loaded: true
+	};
+
+	const transition = applyEditorStateUpdate(state, {
+		pageId: 'page-b',
+		state: {
+			text: 'beta updated',
+			selectionStart: 12,
+			selectionEnd: 12
+		}
+	});
+
+	assert.equal(transition.state.session.pages[1]?.content, 'beta updated');
+	assert.equal(transition.state.session.pages[0]?.content, '');
+	assert.equal(transition.persistedSession?.pages[1]?.content, 'beta updated');
+});
+
+test('applyEditorStateUpdate ignores updates for missing page ids', () => {
+	const initialState: PageAppState = {
+		session: createSession(),
+		loaded: true
+	};
+
+	const transition = applyEditorStateUpdate(initialState, {
+		pageId: 'missing-page',
+		state: {
+			text: 'should be ignored',
+			selectionStart: 0,
+			selectionEnd: 0
+		}
+	});
+
+	assert.equal(transition.state, initialState);
+	assert.equal(transition.persistedSession, null);
 });

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
 	areEditorSessionsEquivalent,
 	getChangedPageEvents
-} from '../src/lib/editor/sync/session-compare.ts';
+} from '../src/lib/editor/persistence/session-events.ts';
 import { createSession } from '../src/lib/editor/core/session.ts';
 
 test('areEditorSessionsEquivalent ignores selection-only differences', () => {
@@ -60,7 +60,7 @@ test('areEditorSessionsEquivalent detects soft-delete changes', () => {
 	assert.equal(areEditorSessionsEquivalent(left, right), false);
 });
 
-test('getChangedPageEvents emits typed local note events', () => {
+test('getChangedPageEvents emits typed local page events', () => {
 	const previous = createSession();
 	const page = previous.pages[0]!;
 	page.id = 'note-1';
@@ -84,6 +84,6 @@ test('getChangedPageEvents emits typed local note events', () => {
 
 	const events = getChangedPageEvents(previous, next);
 	assert.equal(events.some((event) => event.type === 'title-updated' && event.id === 'note-1'), true);
-	assert.equal(events.some((event) => event.type === 'note-updated' && event.id === 'note-1'), true);
-	assert.equal(events.some((event) => event.type === 'new-note' && event.id === 'note-2'), true);
+	assert.equal(events.some((event) => event.type === 'page-updated' && event.id === 'note-1'), true);
+	assert.equal(events.some((event) => event.type === 'new-page' && event.id === 'note-2'), true);
 });

@@ -4,18 +4,18 @@ interface AuthChannelMessage {
 	userId: string | null;
 }
 
-export interface AuthSyncChannelOptions {
+export interface AuthBroadcastChannelOptions {
 	channelName: string;
 	tabId: string;
 	getCurrentUserId: () => string | null;
 	onRemoteAuthChanged: () => void;
 }
 
-export class AuthSyncChannel {
-	private readonly options: AuthSyncChannelOptions;
+export class AuthBroadcastChannel {
+	private readonly options: AuthBroadcastChannelOptions;
 	private channel: BroadcastChannel | null = null;
 
-	constructor(options: AuthSyncChannelOptions) {
+	constructor(options: AuthBroadcastChannelOptions) {
 		this.options = options;
 	}
 

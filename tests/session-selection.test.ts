@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeEditorSelections } from '../src/lib/editor/sync/session-selection.ts';
+import { mergeEditorSelections } from '../src/lib/editor/persistence/session-selection.ts';
 import { createSession } from '../src/lib/editor/core/session.ts';
 
 test('mergeEditorSelections preserves selection by page id and clamps it to the new content length', () => {

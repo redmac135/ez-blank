@@ -1,22 +1,11 @@
 import type { EditorState } from '../basic/history';
+import {
+	ANONYMOUS_USERID,
+	type PageRecord,
+	type PageSyncStatus
+} from '../persistence/records';
 
-export type PageSyncStatus = 'local-only' | 'synced' | 'dirty' | 'deleted' | 'conflict' | 'inconsistent';
-
-export interface EditorPage extends EditorState {
-	id: string;
-	title: string;
-	content: string;
-	createdAt: string;
-	updatedAt: string;
-	deletedAt: string | null;
-	lastSyncedAt: string | null;
-	lastSyncedTitle: string | null;
-	lastSyncedContent: string | null;
-	lastSyncedDeletedAt: string | null;
-	dirty: boolean;
-	syncStatus: PageSyncStatus;
-	lastSyncedVersion: string | null;
-}
+export interface EditorPage extends EditorState, PageRecord {}
 
 export interface EditorSession {
 	pages: EditorPage[];
@@ -38,30 +27,37 @@ export function derivePageTitle(content: string): string {
 	return firstLine.replace(/\s+/g, ' ').slice(0, 48);
 }
 
-export function createPage(content = '', id = createPageId()): EditorPage {
-	const createdAt = new Date().toISOString();
+export function createPage(
+	content = '',
+	options: {
+		id?: string;
+		userId?: string;
+		now?: string;
+		isEphemeral?: boolean;
+	} = {}
+): EditorPage {
+	const timestamp = options.now ?? new Date().toISOString();
 	return {
-		id,
+		id: options.id ?? createPageId(),
+		userId: options.userId ?? ANONYMOUS_USERID,
 		title: derivePageTitle(content),
 		content,
 		text: content,
 		selectionStart: 0,
 		selectionEnd: 0,
-		createdAt,
-		updatedAt: createdAt,
+		createdAt: timestamp,
+		updatedAt: timestamp,
 		deletedAt: null,
 		lastSyncedAt: null,
-		lastSyncedTitle: null,
-		lastSyncedContent: null,
-		lastSyncedDeletedAt: null,
-		dirty: true,
-		syncStatus: 'local-only',
-		lastSyncedVersion: null
+		lastKnownRemoteUpdatedAt: null,
+		lastKnownRemoteDeletedAt: null,
+		syncStatus: 'dirty',
+		isEphemeral: options.isEphemeral ?? true
 	};
 }
 
-export function createSession(): EditorSession {
-	const page = createPage();
+export function createSession(userId = ANONYMOUS_USERID): EditorSession {
+	const page = createPage('', { userId, isEphemeral: true });
 	return {
 		pages: [page],
 		activePageId: page.id
@@ -73,46 +69,108 @@ export function ensureValidActivePage(session: EditorSession): EditorSession {
 		return createSession();
 	}
 
-	if (session.pages.some((page) => page.id === session.activePageId && page.deletedAt === null)) {
-		return session;
+	const pages = sortPagesByRecency(session.pages);
+	if (pages.some((page) => page.id === session.activePageId && page.deletedAt === null)) {
+		return {
+			...session,
+			pages
+		};
 	}
 
-	const firstVisiblePage = session.pages.find((page) => page.deletedAt === null);
+	const firstVisiblePage = pages.find((page) => page.deletedAt === null);
 	if (firstVisiblePage) {
 		return {
 			...session,
+			pages,
 			activePageId: firstVisiblePage.id
 		};
 	}
 
 	return {
 		...session,
-		activePageId: session.pages[0]!.id
+		pages,
+		activePageId: pages[0]!.id
 	};
 }
 
+export function hasVisibleEphemeralActivePage(session: EditorSession) {
+	const activePage = session.pages.find((page) => page.id === session.activePageId) ?? null;
+	return !!activePage && activePage.deletedAt === null && activePage.isEphemeral;
+}
+
+export function getRemoteEligibleActivePageId(session: EditorSession): string | null {
+	const activePage = session.pages.find((page) => page.id === session.activePageId) ?? null;
+	if (!activePage || activePage.deletedAt !== null || activePage.isEphemeral) {
+		return null;
+	}
+
+	return activePage.id;
+}
+
+export function getRemoteActivePageUpdateTarget(
+	previousSession: EditorSession,
+	nextSession: EditorSession
+): string | null {
+	const nextActivePageId = getRemoteEligibleActivePageId(nextSession);
+	if (nextActivePageId && nextActivePageId !== previousSession.activePageId) {
+		return nextActivePageId;
+	}
+
+	const previousActiveBefore = previousSession.pages.find((page) => page.id === previousSession.activePageId) ?? null;
+	const previousActiveAfter = nextSession.pages.find((page) => page.id === previousSession.activePageId) ?? null;
+	if (
+		previousActiveBefore &&
+		previousActiveBefore.deletedAt === null &&
+		previousActiveBefore.isEphemeral &&
+		previousActiveAfter &&
+		previousActiveAfter.deletedAt === null &&
+		!previousActiveAfter.isEphemeral
+	) {
+		return previousActiveAfter.id;
+	}
+
+	return null;
+}
+
 export function updatePageState(page: EditorPage, state: EditorState): EditorPage {
-	const updatedAt = new Date().toISOString();
-	return {
+	const contentChanged = state.text !== page.content;
+	const selectionChanged =
+		state.selectionStart !== page.selectionStart || state.selectionEnd !== page.selectionEnd;
+	if (!contentChanged && !selectionChanged) {
+		return page;
+	}
+
+	const nextPage: EditorPage = {
 		...page,
 		...state,
-		content: state.text,
-		title: derivePageTitle(state.text),
-		updatedAt,
-		dirty: true,
-		syncStatus: page.deletedAt ? 'deleted' : 'dirty'
+		content: state.text
+	};
+
+	if (!contentChanged) {
+		return nextPage;
+	}
+
+	const previousDerivedTitle = derivePageTitle(page.content);
+	const nextDerivedTitle = derivePageTitle(state.text);
+	const shouldAutoDeriveTitle = page.title === previousDerivedTitle;
+
+	return {
+		...nextPage,
+		title: shouldAutoDeriveTitle ? nextDerivedTitle : page.title,
+		updatedAt: new Date().toISOString(),
+		syncStatus: nextDirtyStatus(page.syncStatus),
+		isEphemeral: false
 	};
 }
 
 export function updatePageTitle(page: EditorPage, title: string): EditorPage {
-	const updatedAt = new Date().toISOString();
 	const trimmed = title.trim();
 	return {
 		...page,
 		title: trimmed.length > 0 ? trimmed.slice(0, 48) : UNTITLED_PAGE,
-		updatedAt,
-		dirty: true,
-		syncStatus: page.deletedAt ? 'deleted' : 'dirty'
+		updatedAt: new Date().toISOString(),
+		syncStatus: nextDirtyStatus(page.syncStatus),
+		isEphemeral: false
 	};
 }
 
@@ -121,80 +179,53 @@ export function markPageDeleted(page: EditorPage, deletedAt = new Date().toISOSt
 		...page,
 		deletedAt,
 		updatedAt: deletedAt,
-		dirty: true,
-		syncStatus: 'deleted'
+		syncStatus: nextDirtyStatus(page.syncStatus),
+		isEphemeral: false
 	};
 }
 
-export function applyRemotePageState(
-	page: EditorPage,
-	state: {
-		title: string;
-		content: string;
-		deletedAt: string | null;
-		createdAt: string;
-		updatedAt: string;
+export function materializePage(page: EditorPage): EditorPage {
+	if (!page.isEphemeral) {
+		return page;
 	}
-): EditorPage {
+
 	return {
 		...page,
-		title: state.title,
-		content: state.content,
-		text: state.content,
-		createdAt: page.createdAt ?? state.createdAt,
-		updatedAt: state.updatedAt,
-		deletedAt: state.deletedAt,
-		lastSyncedAt: state.updatedAt,
-		lastSyncedTitle: state.title,
-		lastSyncedContent: state.content,
-		lastSyncedDeletedAt: state.deletedAt,
-		dirty: false,
-		syncStatus: state.deletedAt ? 'deleted' : 'synced',
-		lastSyncedVersion: state.updatedAt
+		updatedAt: new Date().toISOString(),
+		isEphemeral: false
 	};
 }
 
-export function markPageSynced(
-	page: EditorPage,
-	syncedAt: string,
-	lastSyncedVersion = syncedAt
-): EditorPage {
+export function clonePageForUser(page: EditorPage, userId: string): EditorPage {
+	const cloned = createPage(page.content, { userId, isEphemeral: false });
 	return {
-		...page,
-		lastSyncedAt: syncedAt,
-		lastSyncedTitle: page.title,
-		lastSyncedContent: page.content,
-		lastSyncedDeletedAt: page.deletedAt,
-		dirty: false,
-		syncStatus: page.deletedAt ? 'deleted' : 'synced',
-		lastSyncedVersion
+		...cloned,
+		title: page.title,
+		content: page.content,
+		text: page.content,
+		deletedAt: page.deletedAt,
+		syncStatus: 'dirty',
+		isEphemeral: false
 	};
 }
 
-export function createConflictCopy(page: EditorPage, titleSuffix: string, now = new Date()): EditorPage {
-	const createdAt = now.toISOString();
+export function markPageDirty(page: EditorPage, userId = page.userId): EditorPage {
 	return {
 		...page,
-		id: createPageId(),
-		title: `${page.title.trim().length > 0 ? page.title.trim() : UNTITLED_PAGE} ${titleSuffix}`.trim(),
-		createdAt,
-		updatedAt: createdAt,
-		deletedAt: null,
+		userId,
+		updatedAt: new Date().toISOString(),
 		lastSyncedAt: null,
-		lastSyncedTitle: null,
-		lastSyncedContent: null,
-		lastSyncedDeletedAt: null,
-		dirty: true,
-		syncStatus: 'conflict',
-		lastSyncedVersion: null
+		lastKnownRemoteUpdatedAt: null,
+		lastKnownRemoteDeletedAt: null,
+		syncStatus: page.syncStatus === 'conflict' ? 'conflict' : 'dirty'
 	};
 }
 
-export function normalizeSession(value: unknown): EditorSession | null {
+export function normalizeSession(value: unknown, userId = ANONYMOUS_USERID): EditorSession | null {
 	if (!isRecord(value)) return null;
 
 	if (isLegacyEditorState(value)) {
-		return migrateLegacyState(value);
+		return migrateLegacyState(value, userId);
 	}
 
 	if (!Array.isArray(value.pages)) {
@@ -202,11 +233,12 @@ export function normalizeSession(value: unknown): EditorSession | null {
 	}
 
 	const pages = value.pages
-		.map((page, index) => normalizePage(page, index))
-		.filter((page): page is EditorPage => page !== null);
+		.map((page, index) => normalizePage(page, index, userId))
+		.filter((page): page is EditorPage => page !== null)
+	.sort(comparePagesByRecency);
 
 	if (pages.length === 0) {
-		return createSession();
+		return createSession(userId);
 	}
 
 	const activePageId =
@@ -218,15 +250,15 @@ export function normalizeSession(value: unknown): EditorSession | null {
 	return ensureValidActivePage({ pages, activePageId });
 }
 
-export function migrateLegacyState(state: EditorState): EditorSession {
-	const page = updatePageState(createPage(state.text), state);
+export function migrateLegacyState(state: EditorState, userId = ANONYMOUS_USERID): EditorSession {
+	const page = updatePageState(createPage('', { userId, isEphemeral: true }), state);
 	return {
 		pages: [page],
 		activePageId: page.id
 	};
 }
 
-function normalizePage(value: unknown, index: number): EditorPage | null {
+function normalizePage(value: unknown, index: number, userId: string): EditorPage | null {
 	if (!isRecord(value)) return null;
 
 	const content =
@@ -244,59 +276,16 @@ function normalizePage(value: unknown, index: number): EditorPage | null {
 		typeof value.selectionEnd === 'number' ? value.selectionEnd : selectionStart,
 		normalizedContent.length
 	);
-	const createdAt =
-		typeof value.createdAt === 'string' && value.createdAt.length > 0
-			? value.createdAt
-			: typeof value.created_at === 'string' && value.created_at.length > 0
-				? value.created_at
-				: new Date().toISOString();
-	const updatedAt =
-		typeof value.updatedAt === 'string' && value.updatedAt.length > 0
-			? value.updatedAt
-			: new Date().toISOString();
-	const deletedAt =
-		typeof value.deletedAt === 'string'
-			? value.deletedAt
-			: typeof value.deleted_at === 'string'
-				? value.deleted_at
-				: null;
-	const lastSyncedAt =
-		typeof value.lastSyncedAt === 'string'
-			? value.lastSyncedAt
-			: typeof value.lastSyncedVersion === 'string'
-				? value.lastSyncedVersion
-				: null;
-	const lastSyncedTitle =
-		typeof value.lastSyncedTitle === 'string'
-			? value.lastSyncedTitle
-			: lastSyncedAt
-				? typeof value.title === 'string'
-					? value.title.trim()
-					: derivePageTitle(normalizedContent)
-				: null;
-	const lastSyncedContent =
-		typeof value.lastSyncedContent === 'string'
-			? value.lastSyncedContent
-			: lastSyncedAt
-				? normalizedContent
-				: null;
-	const lastSyncedDeletedAt =
-		typeof value.lastSyncedDeletedAt === 'string'
-			? value.lastSyncedDeletedAt
-			: lastSyncedAt
-				? deletedAt
-				: null;
-	const dirty =
-		typeof value.dirty === 'boolean'
-			? value.dirty
-			: lastSyncedAt === null;
-	const syncStatus = normalizeSyncStatus(value.syncStatus, deletedAt, dirty, lastSyncedAt);
+	const createdAt = readTimestamp(value.createdAt, value.created_at);
+	const updatedAt = readTimestamp(value.updatedAt, value.updated_at) ?? createdAt;
+	const deletedAt = readNullableTimestamp(value.deletedAt, value.deleted_at);
 
 	return {
-		id: typeof value.id === 'string' && value.id.length > 0 ? value.id : `page-${index + 1}`,
+		id: typeof value.id === 'string' && value.id.length > 0 ? value.id : createFallbackPageId(index),
+		userId: typeof value.userId === 'string' && value.userId.length > 0 ? value.userId : userId,
 		title:
 			typeof value.title === 'string' && value.title.trim().length > 0
-		? value.title.trim()
+				? value.title.trim()
 				: derivePageTitle(normalizedContent),
 		content: normalizedContent,
 		text: normalizedContent,
@@ -305,20 +294,11 @@ function normalizePage(value: unknown, index: number): EditorPage | null {
 		createdAt,
 		updatedAt,
 		deletedAt,
-		lastSyncedAt,
-		lastSyncedTitle,
-		lastSyncedContent,
-		lastSyncedDeletedAt,
-		dirty,
-		syncStatus,
-		lastSyncedVersion:
-			typeof value.lastSyncedVersion === 'string'
-				? value.lastSyncedVersion
-				: lastSyncedAt
-					? lastSyncedAt
-					: typeof value.serverVersion === 'string'
-						? value.serverVersion
-						: null
+		lastSyncedAt: readNullableTimestamp(value.lastSyncedAt),
+		lastKnownRemoteUpdatedAt: readNullableTimestamp(value.lastKnownRemoteUpdatedAt),
+		lastKnownRemoteDeletedAt: readNullableTimestamp(value.lastKnownRemoteDeletedAt),
+		syncStatus: normalizeSyncStatus(value.syncStatus),
+		isEphemeral: typeof value.isEphemeral === 'boolean' ? value.isEphemeral : false
 	};
 }
 
@@ -334,34 +314,58 @@ function clampSelection(value: number, max: number) {
 	return Math.max(0, Math.min(value, max));
 }
 
-function normalizeSyncStatus(
-	value: unknown,
-	deletedAt: string | null,
-	dirty: boolean,
-	lastSyncedAt: string | null
-): PageSyncStatus {
-	if (
-		value === 'local-only' ||
-		value === 'synced' ||
-		value === 'dirty' ||
-		value === 'deleted' ||
-		value === 'conflict' ||
-		value === 'inconsistent'
-	) {
-		return value;
+function createPageId() {
+	if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+		return crypto.randomUUID();
 	}
 
-	if (deletedAt) {
-		return 'deleted';
-	}
-
-	if (dirty) {
-		return lastSyncedAt ? 'dirty' : 'local-only';
-	}
-
-	return lastSyncedAt ? 'synced' : 'local-only';
+	return `page-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
 }
 
-function createPageId() {
-	return `page-${Math.random().toString(36).slice(2, 10)}`;
+function createFallbackPageId(index: number) {
+	return `page-${index + 1}`;
+}
+
+function readTimestamp(...values: unknown[]) {
+	for (const value of values) {
+		if (typeof value === 'string' && value.length > 0) {
+			return value;
+		}
+	}
+
+	return new Date().toISOString();
+}
+
+function readNullableTimestamp(...values: unknown[]) {
+	for (const value of values) {
+		if (typeof value === 'string') {
+			return value;
+		}
+	}
+
+	return null;
+}
+
+function normalizeSyncStatus(value: unknown): PageSyncStatus {
+	return value === 'synced' || value === 'pending_push' || value === 'conflict' ? value : 'dirty';
+}
+
+function nextDirtyStatus(status: PageSyncStatus): PageSyncStatus {
+	return status === 'conflict' ? 'conflict' : 'dirty';
+}
+
+export function sortPagesByRecency(pages: EditorPage[]) {
+	return [...pages].sort(comparePagesByRecency);
+}
+
+export function comparePagesByRecency(left: EditorPage, right: EditorPage) {
+	if (left.updatedAt !== right.updatedAt) {
+		return right.updatedAt.localeCompare(left.updatedAt);
+	}
+
+	if (left.createdAt !== right.createdAt) {
+		return right.createdAt.localeCompare(left.createdAt);
+	}
+
+	return left.id.localeCompare(right.id);
 }

@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
-	import type { User } from '@supabase/supabase-js';
+	import type { Session, User } from '@supabase/supabase-js';
 	import { onDestroy, onMount, tick } from 'svelte';
 	import { cubicIn, cubicOut } from 'svelte/easing';
 	import { fly } from 'svelte/transition';
@@ -9,29 +9,22 @@
 	import Icon from '$lib/Icon.svelte';
 	import Modal from '$lib/Modal.svelte';
 	import OtpInput from '$lib/OtpInput.svelte';
+	import { createActivePageController } from '$lib/editor/active-page-controller';
 	import {
 		applyEditorStateUpdate,
 		applyHydratedSession,
-		applySessionUpdate
+		applySessionUpdate,
+		type PageEditorUpdate
 	} from '$lib/editor/core/app-state';
-	import {
-		buildSessionFromRemote,
-		applyPageIdMap,
-		hasRemoteContent,
-		hasSessionContent,
-		readRemoteSession,
-		saveRemoteSession
-	} from '$lib/editor/sync/remote-session';
+	import { createSyncController } from '$lib/editor/sync-controller';
 	import {
 		areEditorSessionsEquivalent,
 		getChangedPageEvents,
 		type ChangedPageEvent,
-		type LocalNoteEventType
-	} from '$lib/editor/sync/session-compare';
-	import { mergeEditorSelections } from '$lib/editor/sync/session-selection';
-	import { resolveVersionedSession } from '$lib/editor/sync/versioned-sync';
-	import { AuthSyncChannel } from '$lib/editor/sync/auth-channel';
-	import { RemoteSyncScheduler } from '$lib/editor/sync/remote-sync-scheduler';
+		type LocalPageEventType
+	} from '$lib/editor/persistence/session-events';
+	import { mergeEditorSelections } from '$lib/editor/persistence/session-selection';
+	import { AuthBroadcastChannel } from '$lib/auth/auth-broadcast';
 	import {
 		cycleCountVisibility,
 		DEFAULT_PREFERENCES,
@@ -40,26 +33,33 @@
 		type EditorPreferences,
 		type ThemeMode
 	} from '$lib/editor/core/preferences';
-	import { type EditorState } from '$lib/editor/basic/history';
 	import {
 		findSavedAuthSessionByEmail,
 		removeSavedAuthSession,
 		saveAuthSession
 	} from '$lib/auth/session-vault';
 	import { EditorStorage } from '$lib/editor/persistence/storage';
+	import { ANONYMOUS_USERID } from '$lib/editor/persistence/records';
+	import { fetchRemoteActivePageId, pushRemoteActivePageId, syncUserPages } from '$lib/editor/sync';
 	import { clearActiveSupabaseSession, getSupabaseClient } from '$lib/supabaseClient';
 	import {
+		clonePageForUser,
 		createPage,
 		createSession,
 		markPageDeleted,
 		ensureValidActivePage,
+		getRemoteActivePageUpdateTarget,
+		hasVisibleEphemeralActivePage,
+		sortPagesByRecency,
+		materializePage,
 		type EditorPage,
 		type EditorSession,
 		updatePageTitle
 	} from '$lib/editor/core/session';
 
-	// Session and page UI state.
-	let session: EditorSession = createSession();
+type AppSyncStatus = 'offline' | 'syncing' | 'synced' | 'saved_locally' | 'error';
+
+let session: EditorSession = { pages: [], activePageId: '' };
 	let drawerOpen = false;
 	let loaded = false;
 	let menuPageId: string | null = null;
@@ -70,7 +70,6 @@
 	let chromeVisible = true;
 	let previousActiveText = '';
 
-	// Auth modal + identity state.
 	let emailDraft = '';
 	let otpDraft = '';
 	let loginModalOpen = false;
@@ -89,54 +88,57 @@
 	let currentAuthRequestId = 0;
 	let authSubscription: { unsubscribe: () => void } | null = null;
 	let suppressSavedSessionRemoval = false;
+	let syncBusy = false;
+	let appSyncStatus: AppSyncStatus = 'synced';
 
-	// Element refs.
 	let titleInput: HTMLInputElement | null = null;
 	let countButton: HTMLButtonElement | null = null;
 	let settingsButton: HTMLButtonElement | null = null;
 
-	// Top bar, menus, and transient UI controls.
 	let countMenuOpen = false;
 	let settingsMenuOpen = false;
 	let hideChromeTimeout: ReturnType<typeof setTimeout> | null = null;
 	let preferences: EditorPreferences = DEFAULT_PREFERENCES;
 
-	// Remote sync scheduler/backoff state.
-	let syncBusy = false;
-	let syncQueued = false;
-	let networkOffline = browser ? !navigator.onLine : false;
-
-	// Toast queue + persistence/broadcast infrastructure.
 	let toastNotices: Array<{ id: number; message: string }> = [];
 	let nextToastId = 1;
 	let toastTimeouts = new Map<number, number>();
 	let workspacePersistQueue: Promise<void> = Promise.resolve();
-	let notesChannel: BroadcastChannel | null = null;
-	let authSyncChannel: AuthSyncChannel | null = null;
-	let remoteSyncScheduler: RemoteSyncScheduler | null = null;
-	let lastLocalNoteMutationAt = Date.now();
+	let pagesChannel: BroadcastChannel | null = null;
+	let authBroadcastChannel: AuthBroadcastChannel | null = null;
+	let editorIdleTimeout: ReturnType<typeof setTimeout> | null = null;
 
-	// Tab-local id prevents rebroadcast loops.
 	const tabId =
 		typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
 			? crypto.randomUUID()
 			: `tab-${Math.random().toString(36).slice(2, 10)}`;
-	const LOCAL_NOTE_EVENT_TYPES: Set<LocalNoteEventType> = new Set([
-		'note-updated',
+	const LOCAL_PAGE_EVENT_TYPES: Set<LocalPageEventType> = new Set([
+		'page-updated',
 		'title-updated',
-		'new-note',
-		'deleted-note'
+		'new-page',
+		'deleted-page'
 	]);
-	const AUTH_CHANNEL_NAME = 'notes-auth';
+	const AUTH_CHANNEL_NAME = 'auth';
 
-	// Timing/storage constants for chrome behavior and sync cadence.
 	const TOP_REVEAL_HEIGHT = 112;
 	const CHROME_HIDE_DELAY = 1400;
-	const REMOTE_SYNC_DEBOUNCE_MS = 800;
-	const REMOTE_SYNC_IDLE_MS = 30000;
-	const REMOTE_SYNC_IDLE_CHECK_MS = 5000;
-	const PREFERENCES_KEY = 'ez-blank-preferences-v1';
 	const APP_UPDATED_NOTICE_KEY = 'blank-app-updated-notice';
+	const EDIT_SYNC_DEBOUNCE_MS = 3000;
+	const ACTIVE_PAGE_PUSH_DEBOUNCE_MS = 300;
+	const syncController = createSyncController({
+		delayMs: EDIT_SYNC_DEBOUNCE_MS,
+		runSync: executeSync
+	});
+	const activePageController = createActivePageController({
+		delayMs: ACTIVE_PAGE_PUSH_DEBOUNCE_MS,
+		runPush: async (pageId: string) => {
+			if (!supabase || !authUser || !loaded) {
+				return;
+			}
+
+			await pushRemoteActivePageId(supabase, authUser.id, pageId);
+		}
+	});
 
 	$: activePage = getActivePage(session);
 	$: visiblePages = session.pages.filter((page) => page.deletedAt === null);
@@ -162,6 +164,7 @@
 	$: deletePage = deletePageId
 		? (session.pages.find((page) => page.id === deletePageId) ?? null)
 		: null;
+	$: syncStatusLabel = getSyncStatusLabel(appSyncStatus);
 
 	$: if (!hasDocumentContent || drawerOpen || countMenuOpen || settingsMenuOpen) {
 		chromeVisible = true;
@@ -184,7 +187,7 @@
 	$: if (loaded) {
 		applyTheme(pageTheme);
 	}
-	$: isOffline = networkOffline || (browser && loaded && !navigator.onLine);
+
 	function getActivePage(currentSession: EditorSession): EditorPage {
 		const visiblePage =
 			currentSession.pages.find((page) => page.id === currentSession.activePageId && page.deletedAt === null) ??
@@ -194,31 +197,60 @@
 			return visiblePage;
 		}
 
-		return (
-			currentSession.pages[0] ??
-			createPage()
-		);
+		return currentSession.pages[0] ?? createPage('', { userId: getScopedUserId() });
+	}
+
+	function logSessionDebug(event: string, details: Record<string, unknown> = {}) {
+		console.log('[debug][page]', event, {
+			activePageId: session.activePageId,
+			pageIds: session.pages.map((page) => page.id),
+			pages: session.pages.map((page) => ({
+				id: page.id,
+				title: page.title,
+				isEphemeral: page.isEphemeral,
+				deletedAt: page.deletedAt,
+				contentPreview: page.content.slice(0, 40)
+			})),
+			...details
+		});
+	}
+
+	function summarizeSession(nextSession: EditorSession) {
+		return {
+			activePageId: nextSession.activePageId,
+			pageIds: nextSession.pages.map((page) => page.id),
+			pages: nextSession.pages.map((page) => ({
+				id: page.id,
+				title: page.title,
+				isEphemeral: page.isEphemeral,
+				deletedAt: page.deletedAt,
+				contentPreview: page.content.slice(0, 20)
+			}))
+		};
+	}
+
+	function queueRemoteActivePageUpdate(previousSession: EditorSession, nextSession: EditorSession) {
+		const pageId = getRemoteActivePageUpdateTarget(previousSession, nextSession);
+		if (!pageId || !authUser || !supabase || !loaded) {
+			return;
+		}
+
+		activePageController.schedule(pageId);
 	}
 
 	function persistSession(nextSession: EditorSession) {
 		const normalizedSession = ensureValidActivePage(nextSession);
 		const previousSession = session;
+		logSessionDebug('persistSession:start', {
+			nextActivePageId: normalizedSession.activePageId,
+			nextPageIds: normalizedSession.pages.map((page) => page.id)
+		});
 		const transition = applySessionUpdate({ session, loaded }, normalizedSession);
 		session = transition.state.session;
-		const changedEvents = getChangedPageEvents(previousSession, transition.state.session);
-		const changedNoteData = changedEvents.length > 0;
+		logSessionDebug('persistSession:applied');
+		queueRemoteActivePageUpdate(previousSession, transition.state.session);
 		if (transition.persistedSession) {
-			void persistWorkspaceState(
-				previousSession,
-				transition.persistedSession,
-				authUser ? { dirty: changedNoteData } : undefined
-			);
-			if (changedNoteData) {
-				lastLocalNoteMutationAt = Date.now();
-			}
-		}
-		if (authUser && changedNoteData) {
-			scheduleRemoteSync();
+			void persistWorkspaceState(previousSession, transition.persistedSession);
 		}
 	}
 
@@ -226,36 +258,76 @@
 		nextSession: EditorSession,
 		options: {
 			persist?: boolean;
-			dirty?: boolean;
-			lastSyncedAt?: string | null;
-			replacePageVersions?: boolean;
+			source?: string;
+			details?: Record<string, unknown>;
 		} = {}
 	) {
 		const previousSession = session;
+		console.log('[debug][page] replaceLocalSession', {
+			source: options.source ?? 'unknown',
+			persist: options.persist ?? false,
+			current: summarizeSession(session),
+			next: summarizeSession(nextSession),
+			...options.details
+		});
 		session = ensureValidActivePage(nextSession);
+		queueRemoteActivePageUpdate(previousSession, session);
 		if (loaded && options.persist) {
-			void persistWorkspaceState(previousSession, session, {
-				dirty: options.dirty,
-				lastSyncedAt: options.lastSyncedAt,
-				replacePageVersions: options.replacePageVersions
-			});
+			void persistWorkspaceState(previousSession, session);
 		}
 	}
 
-	function updateActivePage(state: EditorState) {
-		const previousSession = session;
-		const transition = applyEditorStateUpdate({ session, loaded }, state);
-		session = transition.state.session;
-		if (transition.persistedSession) {
-			lastLocalNoteMutationAt = Date.now();
-			void persistWorkspaceState(
-				previousSession,
-				transition.persistedSession,
-				authUser ? { dirty: true } : undefined
-			);
+	function updateActivePage(update: PageEditorUpdate) {
+		if (!session.pages.some((page) => page.id === update.pageId)) {
+			logSessionDebug('updateActivePage:missing-page', {
+				updatePageId: update.pageId,
+				updateContentPreview: update.state.text.slice(0, 40)
+			});
+			return;
 		}
-		if (authUser) {
-			scheduleRemoteSync();
+
+		const previousSession = session;
+		const transition = applyEditorStateUpdate({ session, loaded }, update);
+		session = {
+			...transition.state.session,
+			pages: sortPagesByRecency(transition.state.session.pages)
+		};
+		queueRemoteActivePageUpdate(previousSession, transition.state.session);
+		if (transition.persistedSession) {
+			const previousPage = previousSession.pages.find((page) => page.id === previousSession.activePageId);
+			const nextPage = transition.state.session.pages.find(
+				(page) => page.id === transition.state.session.activePageId
+			);
+			const changedNoteData =
+				!!previousPage &&
+				!!nextPage &&
+				(previousPage.title !== nextPage.title ||
+					previousPage.content !== nextPage.content ||
+					previousPage.deletedAt !== nextPage.deletedAt);
+			if (changedNoteData) {
+				markSavedLocally();
+				scheduleEditorIdleFlush();
+				scheduleDebouncedSync();
+			}
+			void persistWorkspaceState(previousSession, transition.persistedSession);
+		}
+	}
+
+	function handleEditorFocusChange(focused: boolean) {
+		void focused;
+	}
+
+	function scheduleEditorIdleFlush() {
+		clearEditorIdleFlush();
+		editorIdleTimeout = setTimeout(() => {
+			editorIdleTimeout = null;
+		}, 900);
+	}
+
+	function clearEditorIdleFlush() {
+		if (editorIdleTimeout) {
+			clearTimeout(editorIdleTimeout);
+			editorIdleTimeout = null;
 		}
 	}
 
@@ -272,11 +344,18 @@
 	}
 
 	function addPage() {
-		const page = createPage();
+		const currentActivePageId = session.activePageId;
+		const page = createPage('', { userId: getScopedUserId(), isEphemeral: true });
 		persistSession({
-			pages: [...session.pages, page],
+			pages: [
+				...session.pages.map((existingPage) =>
+					existingPage.id === currentActivePageId ? materializePage(existingPage) : existingPage
+				),
+				page
+			],
 			activePageId: page.id
 		});
+		markSavedLocally();
 		menuPageId = null;
 		drawerOpen = false;
 	}
@@ -294,7 +373,7 @@
 		);
 		const nextVisiblePages = nextPages.filter((page) => page.deletedAt === null);
 		if (nextVisiblePages.length === 0) {
-			const replacementPage = createPage();
+			const replacementPage = createPage('', { userId: getScopedUserId(), isEphemeral: true });
 			nextPages.push(replacementPage);
 			persistSession({
 				pages: nextPages,
@@ -313,6 +392,8 @@
 		}
 		menuPageId = null;
 		deletePageId = null;
+		markSavedLocally();
+		requestImmediateSync();
 	}
 
 	function toggleMenu(pageId: string) {
@@ -342,6 +423,8 @@
 				entry.id === pageId ? updatePageTitle(entry, titleDraft) : entry
 			)
 		});
+		markSavedLocally();
+		requestImmediateSync();
 	}
 
 	function cancelTitleEdit() {
@@ -501,13 +584,11 @@
 	}
 
 	async function logout() {
-		if (authBusy) return;
+		if (authBusy || syncBusy) return;
 
 		authBusy = true;
 		authMessage = '';
 		clearAllToasts();
-		clearRemoteSyncTimeout();
-		clearSyncRetryInterval();
 		suppressSavedSessionRemoval = true;
 		await clearActiveSupabaseSession();
 		suppressSavedSessionRemoval = false;
@@ -517,21 +598,22 @@
 
 	async function resolveAnonymousImport(addAnonymousToAccount: boolean) {
 		if (authUser && pendingAnonymousImportSession) {
-			await EditorStorage.markPromptedUserId(authUser.id);
+			await EditorStorage.markPromptedForAnonymousImport(authUser.id);
 		}
 
 		if (addAnonymousToAccount && pendingAnonymousImportSession) {
+			const targetUserId = getScopedUserId(authUser?.id);
 			const nextSession: EditorSession = {
-				pages: [...session.pages, ...pendingAnonymousImportSession.pages],
+				pages: [
+					...session.pages,
+					...pendingAnonymousImportSession.pages.map((page) => clonePageForUser(page, targetUserId))
+				],
 				activePageId: session.activePageId
 			};
 
 			replaceLocalSession(nextSession, {
-				persist: true,
-				dirty: true,
-				lastSyncedAt: null
+				persist: true
 			});
-			scheduleRemoteSync();
 		}
 
 		pendingAnonymousImportSession = null;
@@ -557,153 +639,6 @@
 	function getLineCount(value: string) {
 		if (!value) return 0;
 		return value.split('\n').length;
-	}
-
-	function setupRemoteSyncScheduler() {
-		remoteSyncScheduler?.dispose();
-		remoteSyncScheduler = new RemoteSyncScheduler({
-			debounceMs: REMOTE_SYNC_DEBOUNCE_MS,
-			idleMs: REMOTE_SYNC_IDLE_MS,
-			idleCheckMs: REMOTE_SYNC_IDLE_CHECK_MS,
-			canSync: canSyncRemotely,
-			canRetry: () => !!authUser,
-			isBusy: () => syncBusy,
-			isQueued: () => syncQueued,
-			getLastLocalMutationAt: () => lastLocalNoteMutationAt,
-			setLastLocalMutationAt: (timestamp) => {
-				lastLocalNoteMutationAt = timestamp;
-			},
-			markQueued: () => {
-				syncQueued = true;
-			},
-			onFlush: () => {
-				void flushRemoteSync();
-			},
-			onOnlineReady: () => {
-				scheduleRemoteSync();
-			},
-			isOnline: () => (typeof navigator === 'undefined' ? true : navigator.onLine)
-		});
-	}
-
-	function clearRemoteSyncTimeout() {
-		remoteSyncScheduler?.clearDebounce();
-	}
-
-	function clearSyncRetryInterval() {
-		remoteSyncScheduler?.clearRetry();
-	}
-
-	function setupIdleSyncInterval() {
-		remoteSyncScheduler?.startIdleInterval();
-	}
-
-	function clearIdleSyncInterval() {
-		remoteSyncScheduler?.clearIdleInterval();
-	}
-
-	function startSyncRetryInterval() {
-		remoteSyncScheduler?.startRetry();
-	}
-
-	function scheduleRemoteSync() {
-		remoteSyncScheduler?.schedule();
-	}
-
-	function canSyncRemotely() {
-		return loaded && !!supabase && !!authUser && !importPromptOpen;
-	}
-
-	function syncNow() {
-		remoteSyncScheduler?.syncNow();
-	}
-
-	async function flushRemoteSync() {
-		if (!supabase || !authUser || !loaded) return;
-
-		clearRemoteSyncTimeout();
-		syncBusy = true;
-		authMessage = '';
-		const saveUserId = authUser.id;
-		const snapshot = session;
-		const syncedAt = new Date().toISOString();
-
-		try {
-			const remote = await withTimeout(readRemoteSession(supabase, saveUserId));
-			if (authUser?.id !== saveUserId) {
-				return;
-			}
-			networkOffline = false;
-
-			const meta = await EditorStorage.loadUserSyncMeta(saveUserId);
-			const resolution = resolveVersionedSession(snapshot, remote, {
-				pageVersions: meta.pageVersions
-			});
-
-			if (resolution.conflictCount > 0) {
-				showStatusNotice('conflicts found');
-			}
-
-			const saveResult = await withTimeout(
-				saveRemoteSession(supabase, saveUserId, resolution.session, remote)
-			);
-
-			if (authUser?.id !== saveUserId) {
-				return;
-			}
-
-			const currentSession = session;
-			const finalSession = applyPageIdMap(
-				resolution.session,
-				saveResult.pageIdMap,
-				saveResult.activePageId ?? undefined
-			);
-
-			const mappedCurrentSession = applyPageIdMap(
-				currentSession,
-				saveResult.pageIdMap,
-				saveResult.activePageId ?? undefined
-			);
-
-			if (!areEditorSessionsEquivalent(currentSession, mappedCurrentSession)) {
-				const remapEvents = await persistWorkspaceState(currentSession, mappedCurrentSession, {
-					dirty: true
-				});
-				await applyNoteEventsLocally(remapEvents);
-			}
-
-			if (!areEditorSessionsEquivalent(currentSession, snapshot)) {
-				syncQueued = true;
-				return;
-			}
-
-			const mergedSession = mergeEditorSelections(finalSession, mappedCurrentSession);
-			const changedEvents = await persistWorkspaceState(currentSession, mergedSession, {
-				dirty: false,
-				lastSyncedAt: syncedAt,
-				replacePageVersions: true
-			});
-			await applyNoteEventsLocally(changedEvents);
-
-			if (resolution.updatedFromRemote) {
-				showStatusNotice('updated from remote');
-			}
-		} catch (error) {
-			if (isNetworkFailure(error)) {
-				networkOffline = true;
-				authMessage = '';
-				startSyncRetryInterval();
-			} else {
-				authMessage = getErrorMessage(error, 'Unable to sync changes.');
-			}
-		} finally {
-			syncBusy = false;
-
-			if (syncQueued && authUser?.id === saveUserId) {
-				syncQueued = false;
-				scheduleRemoteSync();
-			}
-		}
 	}
 
 	function clearHideChromeTimeout() {
@@ -763,7 +698,7 @@
 
 	function updatePreferences(nextPreferences: EditorPreferences) {
 		preferences = nextPreferences;
-		savePreferences(nextPreferences);
+		void savePreferences(nextPreferences);
 	}
 
 	function toggleThemeMode() {
@@ -839,87 +774,123 @@
 		}
 	}
 
+	function handleDocumentVisibilityChange() {
+		if (browser && document.visibilityState === 'hidden') {
+			requestImmediateSync();
+		}
+	}
+
+	function handleWindowOffline() {
+		appSyncStatus = 'offline';
+	}
+
 	onMount(() => {
+		document.addEventListener('visibilitychange', handleDocumentVisibilityChange);
+
 		void (async () => {
-			const hydratedState = applyHydratedSession(await EditorStorage.loadAnonymousState());
-			session = hydratedState.session;
-			loaded = hydratedState.loaded;
-			preferences = loadPreferences();
+			let initialAuthSession: Session | null = null;
+			if (supabase) {
+				const {
+					data: { session: authSession },
+					error
+				} = await supabase.auth.getSession();
+
+				if (error) {
+					authMessage = error.message;
+				} else {
+					initialAuthSession = authSession;
+					if (authSession) {
+						saveAuthSession(authSession);
+					}
+				}
+			}
+
+			await hydrateInitialLocalState(initialAuthSession?.user ?? null);
 			previousActiveText = getActivePage(session).content;
 			applyTheme(preferences.themeMode);
 			loadQueuedNotice();
-			setupRemoteSyncScheduler();
 			setupAuthChannel();
 			setupNotesChannel();
-			setupIdleSyncInterval();
-			if (browser) {
-				window.addEventListener('online', handleConnectivityChange);
-				window.addEventListener('offline', handleConnectivityChange);
-			}
-			void initializeAuth();
+			void initializeAuth(initialAuthSession);
 		})();
 	});
 
 	onDestroy(() => {
 		clearHideChromeTimeout();
-		clearRemoteSyncTimeout();
-		clearSyncRetryInterval();
-		clearIdleSyncInterval();
+		clearEditorIdleFlush();
+		syncController.cancel();
+		activePageController.cancel();
 		stopResendCooldown();
 		clearAllToasts();
-		notesChannel?.close();
-		notesChannel = null;
-		authSyncChannel?.close();
-		authSyncChannel = null;
-		remoteSyncScheduler?.dispose();
-		remoteSyncScheduler = null;
-		authSubscription?.unsubscribe();
 		if (browser) {
-			window.removeEventListener('online', handleConnectivityChange);
-			window.removeEventListener('offline', handleConnectivityChange);
+			document.removeEventListener('visibilitychange', handleDocumentVisibilityChange);
 		}
+		pagesChannel?.close();
+		pagesChannel = null;
+		authBroadcastChannel?.close();
+		authBroadcastChannel = null;
+		authSubscription?.unsubscribe();
 	});
 
-	function handleConnectivityChange() {
-		if (typeof navigator === 'undefined') {
-			return;
-		}
+async function loadPreferences(userId = getScopedUserId()) {
+	const loadedPreferences = await EditorStorage.loadPreferences(userId);
+	return normalizePreferences(loadedPreferences);
+}
 
-		if (navigator.onLine) {
-			networkOffline = false;
-			clearSyncRetryInterval();
-			if (authUser) {
-				scheduleRemoteSync();
-			}
-			return;
-		}
+async function hydrateInitialLocalState(nextUser: User | null) {
+	authUser = nextUser;
+	console.log('[debug][page] hydrateInitialLocalState:start', {
+		userId: nextUser?.id ?? null
+	});
 
-		networkOffline = true;
-		if (authUser) {
-			startSyncRetryInterval();
-		}
+	if (!nextUser) {
+		const [anonymousSession, anonymousPreferences] = await Promise.all([
+			EditorStorage.loadUserState(ANONYMOUS_USERID),
+			loadPreferences(ANONYMOUS_USERID)
+		]);
+		console.log('[debug][page] hydrateInitialLocalState:anonymous-loaded', {
+			hasSession: !!anonymousSession,
+			pageIds: anonymousSession?.pages.map((page) => page.id) ?? []
+		});
+		const hydratedState = applyHydratedSession(anonymousSession ?? createSession(ANONYMOUS_USERID));
+		session = hydratedState.session;
+		loaded = hydratedState.loaded;
+		preferences = anonymousPreferences;
+		appSyncStatus = isBrowserOnline() ? 'synced' : 'offline';
+		return;
 	}
 
-	function loadPreferences(): EditorPreferences {
-		try {
-			const saved = localStorage.getItem(PREFERENCES_KEY);
-			return saved ? normalizePreferences(JSON.parse(saved)) : DEFAULT_PREFERENCES;
-		} catch (e) {
-			console.error('Failed to load editor preferences:', e);
-			return DEFAULT_PREFERENCES;
-		}
-	}
+	const [userLocal, userPreferences] = await Promise.all([
+		EditorStorage.loadUserState(nextUser.id),
+		loadPreferences(nextUser.id)
+	]);
+	console.log('[debug][page] hydrateInitialLocalState:user-loaded', {
+		userId: nextUser.id,
+		hasSession: !!userLocal,
+		pageIds: userLocal?.pages.map((page) => page.id) ?? [],
+		activePageId: userLocal?.activePageId ?? null
+	});
+	const hydratedState = applyHydratedSession(userLocal ?? createSession(nextUser.id));
+	session = hydratedState.session;
+	loaded = hydratedState.loaded;
+	preferences = userPreferences;
+	appSyncStatus = isBrowserOnline() ? 'synced' : 'offline';
+}
 
-	function savePreferences(nextPreferences: EditorPreferences) {
-		try {
-			localStorage.setItem(PREFERENCES_KEY, JSON.stringify(nextPreferences));
-		} catch (e) {
-			console.error('Failed to save editor preferences:', e);
-		}
-	}
+async function savePreferences(nextPreferences: EditorPreferences) {
+	await EditorStorage.savePreferences(getScopedUserId(), nextPreferences);
+}
 
 	function applyTheme(themeMode: ThemeMode) {
+		if (!browser) {
+			return;
+		}
+
 		document.body.dataset.theme = themeMode;
+	}
+
+	function isBrowserOnline() {
+		return !browser || navigator.onLine;
 	}
 
 	function loadQueuedNotice() {
@@ -938,26 +909,30 @@
 		}
 	}
 
-	async function initializeAuth() {
+	async function initializeAuth(initialAuthSession?: Session | null) {
 		if (!supabase) {
 			return;
 		}
 
 		authBusy = true;
+		let authSession = initialAuthSession;
 
-		const {
-			data: { session: authSession },
-			error
-		} = await supabase.auth.getSession();
+		if (initialAuthSession === undefined) {
+			const {
+				data: { session: nextAuthSession },
+				error
+			} = await supabase.auth.getSession();
 
-		if (error) {
-			authMessage = error.message;
-			authBusy = false;
-			return;
-		}
+			if (error) {
+				authMessage = error.message;
+				authBusy = false;
+				return;
+			}
 
-		if (authSession) {
-			saveAuthSession(authSession);
+			authSession = nextAuthSession;
+			if (authSession) {
+				saveAuthSession(authSession);
+			}
 		}
 
 		await syncAuthState(authSession?.user ?? null);
@@ -979,98 +954,116 @@
 	async function syncAuthState(nextUser: User | null) {
 		const requestId = ++currentAuthRequestId;
 		authUser = nextUser;
-		clearRemoteSyncTimeout();
-		clearSyncRetryInterval();
-		syncQueued = false;
+		console.log('[debug][page] syncAuthState:start', {
+			requestId,
+			userId: nextUser?.id ?? null
+		});
 
 		if (!nextUser) {
 			pendingAnonymousImportSession = null;
 			importPromptOpen = false;
 			loginModalOpen = false;
-			replaceLocalSession(await EditorStorage.loadAnonymousState());
+			appSyncStatus = isBrowserOnline() ? 'synced' : 'offline';
+			const [anonymousSession, anonymousPreferences] = await Promise.all([
+				EditorStorage.loadAnonymousState(),
+				loadPreferences(ANONYMOUS_USERID)
+			]);
+			preferences = anonymousPreferences;
+			applyTheme(preferences.themeMode);
+			replaceLocalSession(anonymousSession, {
+				source: 'syncAuthState:anonymous-session'
+			});
 			return;
 		}
 
 		authBusy = true;
 		authMessage = '';
-		const userLocal = await EditorStorage.loadUserState(nextUser.id);
 
 		try {
-			if (!supabase) return;
-
-			const [userSyncMeta, anonymousSession, alreadyPrompted] = await Promise.all([
-				EditorStorage.loadUserSyncMeta(nextUser.id),
+			const [userLocal, anonymousSession, alreadyPrompted, userPreferences] = await Promise.all([
+				EditorStorage.loadUserState(nextUser.id),
 				EditorStorage.loadAnonymousState(),
-				EditorStorage.hasPromptedUserId(nextUser.id)
+				EditorStorage.hasPromptedForAnonymousImport(nextUser.id),
+				loadPreferences(nextUser.id)
 			]);
-			const hasAnonymousData = hasSessionContent(anonymousSession);
-
-			if (userLocal) {
-				replaceLocalSession(userLocal);
-			}
-
-			const remote = await withTimeout(readRemoteSession(supabase, nextUser.id));
-			networkOffline = false;
+			console.log('[debug][page] syncAuthState:loaded-local', {
+				requestId,
+				userId: nextUser.id,
+				userLocalPageIds: userLocal?.pages.map((page) => page.id) ?? [],
+				userLocalActivePageId: userLocal?.activePageId ?? null
+			});
+			const hasAnonymousData = anonymousSession.pages.some(
+				(page) => page.deletedAt === null && (page.content.trim().length > 0 || page.title !== 'Untitled')
+			);
 
 			if (currentAuthRequestId !== requestId) {
 				return;
 			}
 
-			if (userLocal) {
-				if (!userSyncMeta.dirty && hasRemoteContent(remote)) {
-					const remoteSession = buildSessionFromRemote(remote);
-					replaceLocalSession(mergeEditorSelections(remoteSession, userLocal), {
-						persist: true,
-						dirty: false,
-						lastSyncedAt: userSyncMeta.lastSyncedAt,
-						replacePageVersions: true
+			preferences = userPreferences;
+			applyTheme(preferences.themeMode);
+
+			const baseSession = userLocal ?? createSession(nextUser.id);
+			let syncedSession = baseSession;
+			console.log('[debug][page] syncAuthState:baseSession', {
+				requestId,
+				activePageId: baseSession.activePageId,
+				pageIds: baseSession.pages.map((page) => page.id)
+			});
+			if (supabase) {
+				appSyncStatus = isBrowserOnline() ? 'syncing' : 'offline';
+				try {
+					syncedSession = (await syncUserPages(supabase, nextUser.id, baseSession)).session;
+					console.log('[debug][page] syncAuthState:syncedSession', {
+						requestId,
+						activePageId: syncedSession.activePageId,
+						pageIds: syncedSession.pages.map((page) => page.id)
 					});
-				} else if (userSyncMeta.dirty) {
-					scheduleRemoteSync();
+					appSyncStatus = 'synced';
+				} catch (error) {
+					appSyncStatus = isBrowserOnline() ? 'error' : 'offline';
+					throw error;
 				}
-
-				if (hasAnonymousData && !alreadyPrompted) {
-					pendingAnonymousImportSession = anonymousSession;
-					importPromptOpen = true;
-				}
-
-				loginModalOpen = false;
-				return;
 			}
-
-			const nextSession = hasRemoteContent(remote)
-				? buildSessionFromRemote(remote)
-				: createSession();
+			const remoteActivePageId =
+				supabase ? await fetchRemoteActivePageId(supabase, nextUser.id) : null;
+			console.log('[debug][page] syncAuthState:remoteActivePage', {
+				requestId,
+				remoteActivePageId
+			});
+			const shouldPreserveLocalEphemeralPage = hasVisibleEphemeralActivePage(syncedSession);
+			const nextSession =
+				!shouldPreserveLocalEphemeralPage &&
+				remoteActivePageId &&
+				syncedSession.pages.some((page) => page.id === remoteActivePageId && page.deletedAt === null)
+					? {
+							...syncedSession,
+							activePageId: remoteActivePageId
+						}
+					: syncedSession;
+			console.log('[debug][page] syncAuthState:nextSession', {
+				requestId,
+				activePageId: nextSession.activePageId,
+				pageIds: nextSession.pages.map((page) => page.id)
+			});
 			if (!areEditorSessionsEquivalent(nextSession, session)) {
 				replaceLocalSession(mergeEditorSelections(nextSession, session), {
-					persist: true,
-					dirty: false,
-					lastSyncedAt: null,
-					replacePageVersions: true
+					source: 'syncAuthState:nextSession',
+					details: { requestId }
 				});
 			}
 
 			if (hasAnonymousData && !alreadyPrompted) {
 				pendingAnonymousImportSession = anonymousSession;
 				importPromptOpen = true;
+			} else {
+				pendingAnonymousImportSession = null;
+				importPromptOpen = false;
 			}
+
 			loginModalOpen = false;
 		} catch (error) {
-			if (isNetworkFailure(error) && nextUser && !userLocal) {
-				networkOffline = true;
-				const fallbackSession = createSession();
-				if (!areEditorSessionsEquivalent(fallbackSession, session)) {
-					replaceLocalSession(mergeEditorSelections(fallbackSession, session), {
-						persist: true,
-						dirty: false,
-						lastSyncedAt: null,
-						replacePageVersions: true
-					});
-				}
-				authMessage = '';
-			} else {
-				authMessage = getErrorMessage(error, 'Unable to load synced notes.');
-			}
+			authMessage = getErrorMessage(error, 'Unable to load saved notes.');
 		} finally {
 			if (currentAuthRequestId === requestId) {
 				authBusy = false;
@@ -1078,43 +1071,25 @@
 		}
 	}
 
-async function persistWorkspaceState(
+	async function persistWorkspaceState(
 		previousSession: EditorSession,
-		nextSession: EditorSession,
-		options: {
-			dirty?: boolean;
-			lastSyncedAt?: string | null;
-			replacePageVersions?: boolean;
-		} = {}
+		nextSession: EditorSession
 	): Promise<ChangedPageEvent[]> {
-		const targetUserId = authUser?.id ?? null;
+		const targetUserId = getScopedUserId();
 		const sessionSnapshot: EditorSession = {
 			activePageId: nextSession.activePageId,
-			pages: nextSession.pages.map((page) => ({ ...page }))
+			pages: nextSession.pages.map((page) => ({ ...page, userId: targetUserId }))
 		};
 		const changedEvents = getChangedPageEvents(previousSession, sessionSnapshot);
 
 		await queueWorkspacePersist(async () => {
-			if (!targetUserId) {
+			if (targetUserId === ANONYMOUS_USERID) {
 				await EditorStorage.saveAnonymousState(sessionSnapshot);
 			} else {
 				await EditorStorage.saveUserState(targetUserId, sessionSnapshot);
-				const currentMeta = await EditorStorage.loadUserSyncMeta(targetUserId);
-				const nextPageVersions = options.replacePageVersions
-					? buildPageVersionMap(sessionSnapshot)
-					: {
-							...currentMeta.pageVersions,
-							...buildPageVersionMap(sessionSnapshot)
-						};
-				await EditorStorage.saveUserSyncMeta(targetUserId, {
-					dirty: options.dirty ?? currentMeta.dirty,
-					lastSyncedAt:
-						options.lastSyncedAt === undefined ? currentMeta.lastSyncedAt : options.lastSyncedAt,
-					pageVersions: nextPageVersions
-				});
 			}
 
-			broadcastNoteUpdates(changedEvents);
+			broadcastPageUpdates(changedEvents);
 		});
 
 		return changedEvents;
@@ -1125,8 +1100,8 @@ async function persistWorkspaceState(
 			return;
 		}
 
-		authSyncChannel?.close();
-		authSyncChannel = new AuthSyncChannel({
+		authBroadcastChannel?.close();
+		authBroadcastChannel = new AuthBroadcastChannel({
 			channelName: AUTH_CHANNEL_NAME,
 			tabId,
 			getCurrentUserId: () => authUser?.id ?? null,
@@ -1134,11 +1109,11 @@ async function persistWorkspaceState(
 				void refreshAuthFromBroadcast();
 			}
 		});
-		authSyncChannel.open();
+		authBroadcastChannel.open();
 	}
 
 	function broadcastAuthSessionChanged(userId: string | null) {
-		authSyncChannel?.broadcast(userId);
+		authBroadcastChannel?.broadcast(userId);
 	}
 
 	async function refreshAuthFromBroadcast() {
@@ -1168,38 +1143,51 @@ async function persistWorkspaceState(
 			return;
 		}
 
-		notesChannel?.close();
-		notesChannel = new BroadcastChannel('notes');
-		notesChannel.onmessage = (event) => {
-			const message = event.data as { type?: unknown; id?: unknown } | null;
-			if (!message || typeof message.type !== 'string' || typeof message.id !== 'string') {
+		pagesChannel?.close();
+		pagesChannel = new BroadcastChannel('pages');
+		pagesChannel.onmessage = (event) => {
+			const message = event.data as { type?: unknown; id?: unknown; userId?: unknown } | null;
+			if (
+				!message ||
+				typeof message.type !== 'string' ||
+				typeof message.id !== 'string' ||
+				typeof message.userId !== 'string'
+			) {
 				return;
 			}
 
-			if (!LOCAL_NOTE_EVENT_TYPES.has(message.type as LocalNoteEventType)) {
+			if (!LOCAL_PAGE_EVENT_TYPES.has(message.type as LocalPageEventType)) {
+				return;
+			}
+			if (message.userId !== getScopedUserId()) {
 				return;
 			}
 
-			void refreshNoteFromIndexedDb(message.type as LocalNoteEventType, message.id);
+			void refreshPageFromIndexedDb(message.type as LocalPageEventType, message.id);
 		};
 	}
 
-	function broadcastNoteUpdates(events: ChangedPageEvent[]) {
-		if (!notesChannel || events.length === 0) {
+	function broadcastPageUpdates(events: ChangedPageEvent[]) {
+		if (!pagesChannel || events.length === 0) {
 			return;
 		}
 
+		const userId = getScopedUserId();
 		for (const event of events) {
-			notesChannel.postMessage({ type: event.type, id: event.id });
+			pagesChannel.postMessage({ type: event.type, id: event.id, userId });
 		}
 	}
 
-	async function applyNoteEventsLocally(events: ChangedPageEvent[]) {
+	async function applyPageEventsLocally(
+		events: ChangedPageEvent[],
+		options: { allowActiveWhileFocused?: boolean } = {}
+	) {
+		void options;
 		if (events.length === 0) {
 			return;
 		}
 
-		const eventById = new Map<string, LocalNoteEventType>();
+		const eventById = new Map<string, LocalPageEventType>();
 		for (const event of events) {
 			const current = eventById.get(event.id);
 			if (!current || compareEventPriority(event.type, current) < 0) {
@@ -1208,16 +1196,22 @@ async function persistWorkspaceState(
 		}
 
 		for (const [id, type] of eventById) {
-			await refreshNoteFromIndexedDb(type, id);
+			await refreshPageFromIndexedDb(type, id);
 		}
 	}
 
-	async function refreshNoteFromIndexedDb(eventType: LocalNoteEventType, noteId: string) {
+	async function refreshPageFromIndexedDb(eventType: LocalPageEventType, noteId: string) {
 		const page = authUser
 			? await EditorStorage.loadUserPage(authUser.id, noteId)
 			: await EditorStorage.loadAnonymousPage(noteId);
+		console.log('[debug][page] refreshPageFromIndexedDb', {
+			eventType,
+			noteId,
+			found: !!page,
+			pagePreview: page ? { id: page.id, title: page.title, contentPreview: page.content.slice(0, 20) } : null
+		});
 		if (!page) {
-			if (eventType !== 'deleted-note') {
+			if (eventType !== 'deleted-page') {
 				return;
 			}
 
@@ -1230,7 +1224,9 @@ async function persistWorkspaceState(
 			}
 
 			replaceLocalSession(nextSession, {
-				persist: false
+				persist: false,
+				source: 'refreshPageFromIndexedDb:deleted-page',
+				details: { eventType, noteId }
 			});
 			return;
 		}
@@ -1251,24 +1247,20 @@ async function persistWorkspaceState(
 		}
 
 		replaceLocalSession(mergeEditorSelections(nextSession, session), {
-			persist: false
+			persist: false,
+			source: 'refreshPageFromIndexedDb:page-load',
+			details: { eventType, noteId }
 		});
 	}
 
-	function compareEventPriority(left: LocalNoteEventType, right: LocalNoteEventType) {
-		const order: Record<LocalNoteEventType, number> = {
-			'deleted-note': 0,
-			'new-note': 1,
-			'note-updated': 2,
+	function compareEventPriority(left: LocalPageEventType, right: LocalPageEventType) {
+		const order: Record<LocalPageEventType, number> = {
+			'deleted-page': 0,
+			'new-page': 1,
+			'page-updated': 2,
 			'title-updated': 3
 		};
 		return order[left] - order[right];
-	}
-
-	function buildPageVersionMap(nextSession: EditorSession) {
-		return Object.fromEntries(
-			nextSession.pages.map((page) => [page.id, page.lastSyncedVersion])
-		) as Record<string, string | null>;
 	}
 
 	function showStatusNotice(message: string) {
@@ -1325,49 +1317,121 @@ async function persistWorkspaceState(
 		return fallback;
 	}
 
-	function isNetworkFailure(error: unknown) {
-		if (typeof navigator !== 'undefined' && !navigator.onLine) {
-			return true;
-		}
-
-		if (error instanceof TypeError && /failed to fetch/i.test(error.message)) {
-			return true;
-		}
-
-		if (
-			typeof error === 'object' &&
-			error &&
-			'message' in error &&
-			typeof error.message === 'string' &&
-			/failed to fetch/i.test(error.message)
-		) {
-			return true;
-		}
-
-		return false;
+	function getScopedUserId(userId: string | null = authUser?.id ?? null) {
+		return userId ?? ANONYMOUS_USERID;
 	}
 
-	function withTimeout<T>(promise: Promise<T>, timeoutMs = 8000): Promise<T> {
-		return new Promise<T>((resolve, reject) => {
-			const timeout = setTimeout(() => {
-				reject(new TypeError('Failed to fetch'));
-			}, timeoutMs);
+	function markSavedLocally() {
+		if (!authUser) {
+			return;
+		}
 
-			promise
-				.then((value) => {
-					clearTimeout(timeout);
-					resolve(value);
-				})
-				.catch((error) => {
-					clearTimeout(timeout);
-					reject(error);
+		appSyncStatus = isBrowserOnline() ? 'saved_locally' : 'offline';
+	}
+
+	function getSyncStatusLabel(status: AppSyncStatus) {
+		switch (status) {
+			case 'offline':
+				return 'Offline';
+			case 'syncing':
+				return 'Syncing…';
+			case 'synced':
+				return 'Synced';
+			case 'saved_locally':
+				return 'Saved locally';
+			case 'error':
+				return 'Sync error';
+		}
+	}
+
+	function scheduleDebouncedSync() {
+		if (!supabase || !authUser || !loaded) {
+			return;
+		}
+
+		syncController.scheduleDebounced();
+	}
+
+	function requestImmediateSync(options: { showSuccessNotice?: boolean } = {}) {
+		if (!supabase || !authUser || !loaded) {
+			return;
+		}
+
+		syncController.requestImmediate({ showSuccessNotice: options.showSuccessNotice ?? false });
+	}
+
+	async function executeSync(options: { showSuccessNotice: boolean }) {
+		if (!supabase || !authUser || !loaded) {
+			return;
+		}
+
+		const syncSourceSession = session;
+		syncBusy = true;
+		appSyncStatus = isBrowserOnline() ? 'syncing' : 'offline';
+		authMessage = '';
+
+		try {
+			console.log('[debug][page] executeSync:start', summarizeSession(syncSourceSession));
+			const result = await syncUserPages(supabase, authUser.id, syncSourceSession);
+			console.log('[debug][page] executeSync:result', {
+				pushedCount: result.pushedCount,
+				pulledCount: result.pulledCount,
+				conflictCount: result.conflictCount,
+				session: summarizeSession(result.session)
+			});
+
+			if (!areEditorSessionsEquivalent(session, syncSourceSession)) {
+				console.log('[debug][page] executeSync:queueFollowUp', {
+					current: summarizeSession(session),
+					source: summarizeSession(syncSourceSession)
 				});
-		});
+				syncController.queueFollowUp(options);
+				return;
+			}
+
+			replaceLocalSession(mergeEditorSelections(result.session, session), {
+				persist: true,
+				source: 'executeSync:result'
+			});
+
+			if (result.conflictCount > 0) {
+				showStatusNotice(
+					result.conflictCount === 1
+						? 'Sync complete with 1 conflict fork'
+						: `Sync complete with ${result.conflictCount} conflict forks`
+				);
+			} else if (options.showSuccessNotice && (result.pushedCount > 0 || result.pulledCount > 0)) {
+				showStatusNotice('Sync complete');
+			}
+			appSyncStatus = 'synced';
+		} catch (error) {
+			appSyncStatus = isBrowserOnline() ? 'error' : 'offline';
+			authMessage = getErrorMessage(error, 'Unable to sync pages.');
+		} finally {
+			syncBusy = false;
+		}
+	}
+
+	function handleWindowBlur() {
+		requestImmediateSync();
+	}
+
+	function handleWindowOnline() {
+		appSyncStatus = 'saved_locally';
+		requestImmediateSync();
+	}
+
+	function handleWindowBeforeUnload() {
+		void persistWorkspaceState(session, session);
+		requestImmediateSync();
 	}
 </script>
 
 <svelte:window
-	on:beforeunload={() => void persistWorkspaceState(session, session)}
+	on:beforeunload={handleWindowBeforeUnload}
+	on:blur={handleWindowBlur}
+	on:online={handleWindowOnline}
+	on:offline={handleWindowOffline}
 	on:mousemove={handleMouseMove}
 	on:mousedown={handleWindowPointerDown}
 	on:keydown={handleWindowKeydown}
@@ -1413,12 +1477,14 @@ async function persistWorkspaceState(
 							{getCountVisibilityLabel(preferences.countVisibility)}
 						</button>
 						{#if authUser}
-							<button type="button" disabled={syncBusy} on:click={syncNow}>
-								{syncBusy ? 'Syncing…' : 'Sync now'}
+							<button
+								type="button"
+								disabled={syncBusy || appSyncStatus === 'offline'}
+								on:click={() => requestImmediateSync({ showSuccessNotice: true })}
+							>
+								{syncStatusLabel}
 							</button>
-						{/if}
-						{#if authUser}
-							<button type="button" disabled={authBusy} on:click={logout}>Logout</button>
+							<button type="button" disabled={authBusy || syncBusy} on:click={logout}>Logout</button>
 							<div class="menu-stat">{authUser.email ?? authUser.id}</div>
 						{:else}
 							<button
@@ -1584,13 +1650,13 @@ async function persistWorkspaceState(
 	{/if}
 
 	{#if importPromptOpen && pendingAnonymousImportSession}
-		<Modal title="Add local data to remote data?" dismissible={false}>
-			<p>Do you want local data added to remote data for this account?</p>
+		<Modal title="Add local data to this account?" dismissible={false}>
+			<p>Do you want the notes already stored on this device added to this account's local workspace?</p>
 			<svelte:fragment slot="actions">
 				<button
 					type="button"
 					class="modal-button"
-					disabled={syncBusy}
+					disabled={authBusy}
 					on:click={() => resolveAnonymousImport(false)}
 				>
 					No
@@ -1598,7 +1664,7 @@ async function persistWorkspaceState(
 				<button
 					type="button"
 					class="modal-button modal-button-primary"
-					disabled={syncBusy}
+					disabled={authBusy}
 					on:click={() => resolveAnonymousImport(true)}
 				>
 					Yes
@@ -1678,12 +1744,14 @@ async function persistWorkspaceState(
 		{#if loaded}
 			{#key activePage.id}
 				<Editor
+					pageId={activePage.id}
 					initialState={{
 						text: activePage.content,
 						selectionStart: activePage.selectionStart,
 						selectionEnd: activePage.selectionEnd
 					}}
 					spellcheckEnabled={preferences.spellcheckEnabled}
+					onFocusChange={handleEditorFocusChange}
 					onChange={updateActivePage}
 				/>
 			{/key}

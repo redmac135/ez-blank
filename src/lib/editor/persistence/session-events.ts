@@ -1,11 +1,9 @@
 import type { EditorSession } from '../core/session';
 
-// Runtime helpers used by cross-tab and remote sync flow.
-
-export type LocalNoteEventType = 'note-updated' | 'title-updated' | 'new-note' | 'deleted-note';
+export type LocalPageEventType = 'page-updated' | 'title-updated' | 'new-page' | 'deleted-page';
 
 export interface ChangedPageEvent {
-	type: LocalNoteEventType;
+	type: LocalPageEventType;
 	id: string;
 }
 
@@ -39,10 +37,6 @@ export function areEditorSessionsEquivalent(a: EditorSession, b: EditorSession):
 	return true;
 }
 
-export function getChangedPageIds(previousSession: EditorSession, nextSession: EditorSession): string[] {
-	return [...new Set(getChangedPageEvents(previousSession, nextSession).map((event) => event.id))];
-}
-
 export function getChangedPageEvents(
 	previousSession: EditorSession,
 	nextSession: EditorSession
@@ -54,7 +48,7 @@ export function getChangedPageEvents(
 	for (const [id, nextPage] of nextPages) {
 		const previousPage = previousPages.get(id);
 		if (!previousPage) {
-			events.set(`new-note:${id}`, { type: 'new-note', id });
+			events.set(`new-page:${id}`, { type: 'new-page', id });
 			continue;
 		}
 
@@ -65,12 +59,12 @@ export function getChangedPageEvents(
 		const becameActive = previousPage.deletedAt !== null && nextPage.deletedAt === null;
 
 		if (becameDeleted) {
-			events.set(`deleted-note:${id}`, { type: 'deleted-note', id });
+			events.set(`deleted-page:${id}`, { type: 'deleted-page', id });
 			continue;
 		}
 
 		if (becameActive) {
-			events.set(`new-note:${id}`, { type: 'new-note', id });
+			events.set(`new-page:${id}`, { type: 'new-page', id });
 		}
 
 		if (titleChanged) {
@@ -78,13 +72,13 @@ export function getChangedPageEvents(
 		}
 
 		if (contentChanged || deleteChanged) {
-			events.set(`note-updated:${id}`, { type: 'note-updated', id });
+			events.set(`page-updated:${id}`, { type: 'page-updated', id });
 		}
 	}
 
 	for (const [id] of previousPages) {
 		if (!nextPages.has(id)) {
-			events.set(`deleted-note:${id}`, { type: 'deleted-note', id });
+			events.set(`deleted-page:${id}`, { type: 'deleted-page', id });
 		}
 	}
 

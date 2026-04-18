@@ -1,7 +1,5 @@
 import type { EditorSession } from '../core/session';
 
-// Runtime helper for preserving selection when session content is reloaded.
-
 export function mergeEditorSelections(
 	nextSession: EditorSession,
 	selectionSource: EditorSession
