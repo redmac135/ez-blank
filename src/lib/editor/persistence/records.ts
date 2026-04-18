@@ -3,6 +3,7 @@ export const BLANK_DB_VERSION = 1;
 export const PAGES_STORE_NAME = 'pages';
 export const SETTINGS_STORE_NAME = 'settings';
 export const USER_ID_INDEX = 'userId';
+export const UPDATED_AT_INDEX = 'updatedAt';
 
 export const ANONYMOUS_USERID = 'anonymous';
 

@@ -42,6 +42,7 @@ test('EditorStorage saves and loads anonymous state through the blank database s
 	const loaded = await EditorStorage.loadAnonymousState();
 	assert.equal(loaded.activePageId, 'page-b');
 	assert.equal(loaded.pages.length, session.pages.length);
+	assert.equal(loaded.pages[0]?.id, 'page-b');
 	assert.equal(loaded.pages[0]?.userId, ANONYMOUS_USERID);
 	assert.equal(loaded.pages[0]?.isEphemeral, false);
 });

@@ -152,7 +152,6 @@ test('syncUserPages ignores ephemeral placeholder pages', async () => {
 	assert.equal(result.session.pages[0]?.id, 'page-ephemeral');
 	assert.equal(result.session.pages[0]?.isEphemeral, true);
 	assert.equal(supabase.getRows('user-a').length, 0);
-	assert.equal(supabase.getActivePageId('user-a'), null);
 });
 
 test('syncUserPages pushes local-only real pages and trusts the write response', async () => {
@@ -174,7 +173,33 @@ test('syncUserPages pushes local-only real pages and trusts the write response',
 	assert.equal(result.session.pages[0]?.lastSyncedAt, '2026-04-17T18:01:00.000Z');
 	assert.equal(supabase.getRows('user-a').length, 1);
 	assert.equal(supabase.getRows('user-a')[0]?.id, 'local-1');
-	assert.equal(supabase.getActivePageId('user-a'), 'local-1');
+});
+
+test('syncUserPages removes locally deleted pages when the remote row is already gone', async () => {
+	const local = createPage('local body', {
+		id: 'local-1',
+		userId: 'user-a',
+		now: '2026-04-17T18:00:00.000Z',
+		isEphemeral: false
+	});
+	local.title = 'Local';
+	local.lastSyncedAt = '2026-04-17T18:01:00.000Z';
+	local.lastKnownRemoteUpdatedAt = '2026-04-17T18:01:00.000Z';
+	local.lastKnownRemoteDeletedAt = null;
+	local.deletedAt = '2026-04-17T18:02:00.000Z';
+	local.updatedAt = '2026-04-17T18:02:00.000Z';
+	local.syncStatus = 'dirty' as PageSyncStatus;
+
+	const supabase = new FakeSupabase();
+	const result = await syncUserPages(supabase as never, 'user-a', buildSession(local), new Date('2026-04-17T18:03:00.000Z'));
+
+	assert.equal(result.pushedCount, 0);
+	assert.equal(result.pulledCount, 0);
+	assert.equal(result.conflictCount, 0);
+	assert.equal(result.session.pages.length, 1);
+	assert.equal(result.session.pages[0]?.isEphemeral, true);
+	assert.notEqual(result.session.pages[0]?.id, 'local-1');
+	assert.equal(supabase.getRows('user-a').length, 0);
 });
 
 test('syncUserPages pulls remote-only pages into the local session', async () => {
@@ -199,7 +224,27 @@ test('syncUserPages pulls remote-only pages into the local session', async () =>
 	assert.equal(result.session.pages[0]?.syncStatus, 'synced');
 	assert.equal(result.session.pages[0]?.lastSyncedAt, '2026-04-17T18:00:00.000Z');
 	assert.equal(result.session.pages[0]?.isEphemeral, false);
-	assert.equal(supabase.getActivePageId('user-a'), 'remote-1');
+});
+
+test('syncUserPages ignores remote-only pages that are already deleted', async () => {
+	const supabase = new FakeSupabase([
+		{
+			id: 'remote-1',
+			user_id: 'user-a',
+			title: 'Remote',
+			content: 'remote body',
+			created_at: '2026-04-17T18:00:00.000Z',
+			updated_at: '2026-04-17T18:00:00.000Z',
+			deleted_at: '2026-04-17T18:00:00.000Z'
+		}
+	]);
+	const emptyLocal: EditorSession = { pages: [], activePageId: 'missing' };
+
+	const result = await syncUserPages(supabase as never, 'user-a', emptyLocal, new Date('2026-04-17T18:05:00.000Z'));
+
+	assert.equal(result.pulledCount, 0);
+	assert.equal(result.session.pages.length, 1);
+	assert.equal(result.session.pages[0]?.isEphemeral, true);
 });
 
 test('syncUserPages forks when local and remote both changed', async () => {
@@ -233,21 +278,21 @@ test('syncUserPages forks when local and remote both changed', async () => {
 	assert.equal(result.conflictCount, 1);
 	assert.equal(result.pushedCount, 1);
 	assert.equal(result.session.pages.length, 2);
-	assert.equal(result.session.pages[0]?.id, 'page-1');
-	assert.equal(result.session.pages[0]?.content, 'remote edit');
+	assert.notEqual(result.session.pages[0]?.id, 'page-1');
+	assert.match(result.session.pages[0]?.title ?? '', /^Shared \(Local conflict /);
+	assert.equal(result.session.pages[0]?.content, 'local edit');
 	assert.equal(result.session.pages[0]?.syncStatus, 'synced');
-	assert.notEqual(result.session.pages[1]?.id, 'page-1');
-	assert.match(result.session.pages[1]?.title ?? '', /^Shared \(Local conflict /);
-	assert.equal(result.session.pages[1]?.content, 'local edit');
+	assert.equal(result.session.pages[0]?.lastSyncedAt, result.session.pages[0]?.updatedAt);
+	assert.equal(result.session.pages[0]?.isEphemeral, false);
+	assert.equal(result.session.pages[1]?.id, 'page-1');
+	assert.equal(result.session.pages[1]?.content, 'remote edit');
 	assert.equal(result.session.pages[1]?.syncStatus, 'synced');
-	assert.equal(result.session.pages[1]?.lastSyncedAt, result.session.pages[1]?.updatedAt);
-	assert.equal(result.session.pages[1]?.isEphemeral, false);
 	assert.equal(supabase.getRows('user-a').length, 2);
 	assert.equal(supabase.getRows('user-a').some((row) => row.content === 'local edit'), true);
 });
 
 test('syncUserPages handles remote delete versus local edit by forking the local edit', async () => {
-	const local = createPage('keep me', {
+	const local = createPage('keep me locally', {
 		id: 'page-1',
 		userId: 'user-a',
 		now: '2026-04-17T18:00:00.000Z',
@@ -265,7 +310,7 @@ test('syncUserPages handles remote delete versus local edit by forking the local
 			id: 'page-1',
 			user_id: 'user-a',
 			title: 'Conflict',
-			content: 'keep me',
+			content: 'server copy',
 			created_at: '2026-04-17T18:00:00.000Z',
 			updated_at: '2026-04-17T18:04:00.000Z',
 			deleted_at: '2026-04-17T18:04:00.000Z'
@@ -275,10 +320,49 @@ test('syncUserPages handles remote delete versus local edit by forking the local
 	const result = await syncUserPages(supabase as never, 'user-a', buildSession(local), new Date('2026-04-17T18:05:00.000Z'));
 
 	assert.equal(result.conflictCount, 1);
-	assert.equal(result.session.pages.length, 2);
-	assert.equal(result.session.pages[0]?.deletedAt, '2026-04-17T18:04:00.000Z');
-	assert.equal(result.session.pages[1]?.deletedAt, null);
-	assert.match(result.session.pages[1]?.title ?? '', /^Conflict \(Local conflict /);
+	assert.equal(result.pushedCount, 1);
+	assert.equal(result.session.pages.length, 1);
+	assert.notEqual(result.session.pages[0]?.id, 'page-1');
+	assert.equal(result.session.pages[0]?.deletedAt, null);
+	assert.equal(result.session.pages[0]?.content, 'keep me locally');
+	assert.match(result.session.pages[0]?.title ?? '', /^Conflict \(Local conflict /);
+	assert.equal(supabase.getRows('user-a').length, 2);
+	assert.equal(supabase.getRows('user-a').some((row) => row.id === 'page-1' && row.deleted_at !== null), true);
+	assert.equal(supabase.getRows('user-a').some((row) => row.content === 'keep me locally' && row.deleted_at === null), true);
+});
+
+test('syncUserPages removes local pages when the remote version is deleted without a local edit', async () => {
+	const local = createPage('server body', {
+		id: 'page-1',
+		userId: 'user-a',
+		now: '2026-04-17T18:00:00.000Z',
+		isEphemeral: false
+	});
+	local.title = 'Conflict';
+	local.updatedAt = '2026-04-17T18:01:00.000Z';
+	local.lastSyncedAt = '2026-04-17T18:01:00.000Z';
+	local.lastKnownRemoteUpdatedAt = '2026-04-17T18:01:00.000Z';
+	local.lastKnownRemoteDeletedAt = null;
+	local.syncStatus = 'synced' as PageSyncStatus;
+
+	const supabase = new FakeSupabase([
+		{
+			id: 'page-1',
+			user_id: 'user-a',
+			title: 'Conflict',
+			content: 'server body',
+			created_at: '2026-04-17T18:00:00.000Z',
+			updated_at: '2026-04-17T18:04:00.000Z',
+			deleted_at: '2026-04-17T18:04:00.000Z'
+		}
+	]);
+
+	const result = await syncUserPages(supabase as never, 'user-a', buildSession(local), new Date('2026-04-17T18:05:00.000Z'));
+
+	assert.equal(result.pulledCount, 1);
+	assert.equal(result.conflictCount, 0);
+	assert.equal(result.session.pages.length, 1);
+	assert.equal(result.session.pages[0]?.isEphemeral, true);
 });
 
 test('syncUserPages rejects concurrent sync passes with the global guard', async () => {

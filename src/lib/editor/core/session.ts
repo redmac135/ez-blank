@@ -69,22 +69,67 @@ export function ensureValidActivePage(session: EditorSession): EditorSession {
 		return createSession();
 	}
 
-	if (session.pages.some((page) => page.id === session.activePageId && page.deletedAt === null)) {
-		return session;
+	const pages = sortPagesByRecency(session.pages);
+	if (pages.some((page) => page.id === session.activePageId && page.deletedAt === null)) {
+		return {
+			...session,
+			pages
+		};
 	}
 
-	const firstVisiblePage = session.pages.find((page) => page.deletedAt === null);
+	const firstVisiblePage = pages.find((page) => page.deletedAt === null);
 	if (firstVisiblePage) {
 		return {
 			...session,
+			pages,
 			activePageId: firstVisiblePage.id
 		};
 	}
 
 	return {
 		...session,
-		activePageId: session.pages[0]!.id
+		pages,
+		activePageId: pages[0]!.id
 	};
+}
+
+export function hasVisibleEphemeralActivePage(session: EditorSession) {
+	const activePage = session.pages.find((page) => page.id === session.activePageId) ?? null;
+	return !!activePage && activePage.deletedAt === null && activePage.isEphemeral;
+}
+
+export function getRemoteEligibleActivePageId(session: EditorSession): string | null {
+	const activePage = session.pages.find((page) => page.id === session.activePageId) ?? null;
+	if (!activePage || activePage.deletedAt !== null || activePage.isEphemeral) {
+		return null;
+	}
+
+	return activePage.id;
+}
+
+export function getRemoteActivePageUpdateTarget(
+	previousSession: EditorSession,
+	nextSession: EditorSession
+): string | null {
+	const nextActivePageId = getRemoteEligibleActivePageId(nextSession);
+	if (nextActivePageId && nextActivePageId !== previousSession.activePageId) {
+		return nextActivePageId;
+	}
+
+	const previousActiveBefore = previousSession.pages.find((page) => page.id === previousSession.activePageId) ?? null;
+	const previousActiveAfter = nextSession.pages.find((page) => page.id === previousSession.activePageId) ?? null;
+	if (
+		previousActiveBefore &&
+		previousActiveBefore.deletedAt === null &&
+		previousActiveBefore.isEphemeral &&
+		previousActiveAfter &&
+		previousActiveAfter.deletedAt === null &&
+		!previousActiveAfter.isEphemeral
+	) {
+		return previousActiveAfter.id;
+	}
+
+	return null;
 }
 
 export function updatePageState(page: EditorPage, state: EditorState): EditorPage {
@@ -190,7 +235,7 @@ export function normalizeSession(value: unknown, userId = ANONYMOUS_USERID): Edi
 	const pages = value.pages
 		.map((page, index) => normalizePage(page, index, userId))
 		.filter((page): page is EditorPage => page !== null)
-		.sort(comparePages);
+	.sort(comparePagesByRecency);
 
 	if (pages.length === 0) {
 		return createSession(userId);
@@ -309,9 +354,17 @@ function nextDirtyStatus(status: PageSyncStatus): PageSyncStatus {
 	return status === 'conflict' ? 'conflict' : 'dirty';
 }
 
-function comparePages(left: EditorPage, right: EditorPage) {
+export function sortPagesByRecency(pages: EditorPage[]) {
+	return [...pages].sort(comparePagesByRecency);
+}
+
+export function comparePagesByRecency(left: EditorPage, right: EditorPage) {
+	if (left.updatedAt !== right.updatedAt) {
+		return right.updatedAt.localeCompare(left.updatedAt);
+	}
+
 	if (left.createdAt !== right.createdAt) {
-		return left.createdAt.localeCompare(right.createdAt);
+		return right.createdAt.localeCompare(left.createdAt);
 	}
 
 	return left.id.localeCompare(right.id);

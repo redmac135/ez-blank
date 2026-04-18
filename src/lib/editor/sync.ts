@@ -1,5 +1,10 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { createPage, ensureValidActivePage, type EditorPage, type EditorSession } from './core/session';
+import {
+	createPage,
+	ensureValidActivePage,
+	type EditorPage,
+	type EditorSession
+} from './core/session';
 
 const REMOTE_PAGE_COLUMNS = 'id,user_id,title,content,created_at,updated_at,deleted_at';
 
@@ -66,6 +71,10 @@ export async function syncUserPages(
 
 			const remote = remoteById.get(localPage.id) ?? null;
 			if (!remote) {
+				if (localPage.deletedAt !== null) {
+					continue;
+				}
+
 				const pushed = await pushLocalPage(supabase, userId, localPage);
 				nextPages.push(toSyncedLocalPage(pushed, localPage));
 				pushedCount += 1;
@@ -78,12 +87,16 @@ export async function syncUserPages(
 			const sameState = pageStatesMatch(localPage, remote);
 
 			if (!localChanged && !remoteChanged) {
-				nextPages.push(toSyncedLocalPage(remote, localPage));
+				if (shouldKeepRemotePageLocally(remote)) {
+					nextPages.push(toSyncedLocalPage(remote, localPage));
+				}
 				continue;
 			}
 
 			if (sameState) {
-				nextPages.push(toSyncedLocalPage(remote, localPage));
+				if (shouldKeepRemotePageLocally(remote)) {
+					nextPages.push(toSyncedLocalPage(remote, localPage));
+				}
 				continue;
 			}
 
@@ -95,14 +108,18 @@ export async function syncUserPages(
 			}
 
 			if (!localChanged && remoteChanged) {
-				nextPages.push(toSyncedLocalPage(remote, localPage));
+				if (shouldKeepRemotePageLocally(remote)) {
+					nextPages.push(toSyncedLocalPage(remote, localPage));
+				}
 				pulledCount += 1;
 				continue;
 			}
 
 			const remotePage = toSyncedLocalPage(remote, localPage);
-			nextPages.push(remotePage);
 			conflictCount += 1;
+			if (shouldKeepRemotePageLocally(remote)) {
+				nextPages.push(remotePage);
+			}
 
 			const conflictFork = forkConflictPage(localPage, now);
 			const pushedFork = await pushLocalPage(supabase, userId, conflictFork);
@@ -120,6 +137,10 @@ export async function syncUserPages(
 				continue;
 			}
 
+			if (!shouldKeepRemotePageLocally(remote)) {
+				continue;
+			}
+
 			nextPages.push(toSyncedLocalPage(remote, null));
 			pulledCount += 1;
 		}
@@ -128,11 +149,6 @@ export async function syncUserPages(
 			pages: sortPages(nextPages),
 			activePageId: nextActivePageId
 		});
-		const remoteActivePageId = getRemoteActivePageId(nextSession);
-		if (remoteActivePageId) {
-			await pushRemoteActivePageId(supabase, userId, remoteActivePageId);
-		}
-
 		return {
 			session: nextSession,
 			pushedCount,
@@ -221,7 +237,7 @@ async function pushLocalPage(
 	return data as RemotePageRow;
 }
 
-async function pushRemoteActivePageId(supabase: SupabaseClient, userId: string, activePageId: string) {
+export async function pushRemoteActivePageId(supabase: SupabaseClient, userId: string, activePageId: string) {
 	const { error } = await supabase.from('user_settings').upsert({
 		user_id: userId,
 		active_page_id: activePageId
@@ -294,6 +310,10 @@ function pageStatesMatch(localPage: EditorPage, remote: RemotePageRow) {
 	);
 }
 
+function shouldKeepRemotePageLocally(remote: RemotePageRow) {
+	return remote.deleted_at === null;
+}
+
 function buildConflictSuffix(now: Date) {
 	const label = new Intl.DateTimeFormat(undefined, {
 		dateStyle: 'medium',
@@ -305,19 +325,14 @@ function buildConflictSuffix(now: Date) {
 
 function sortPages(pages: EditorPage[]) {
 	return [...pages].sort((left, right) => {
+		if (left.updatedAt !== right.updatedAt) {
+			return right.updatedAt.localeCompare(left.updatedAt);
+		}
+
 		if (left.createdAt !== right.createdAt) {
-			return left.createdAt.localeCompare(right.createdAt);
+			return right.createdAt.localeCompare(left.createdAt);
 		}
 
 		return left.id.localeCompare(right.id);
 	});
-}
-
-function getRemoteActivePageId(session: EditorSession) {
-	const activePage = session.pages.find((page) => page.id === session.activePageId) ?? null;
-	if (!activePage || activePage.isEphemeral || activePage.deletedAt !== null) {
-		return null;
-	}
-
-	return activePage.id;
 }

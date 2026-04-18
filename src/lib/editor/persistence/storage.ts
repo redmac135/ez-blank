@@ -4,6 +4,7 @@ import {
 	createPage,
 	createSession,
 	normalizeSession,
+	sortPagesByRecency,
 	type EditorPage,
 	type EditorSession
 } from '../core/session';
@@ -19,6 +20,7 @@ import {
 	SETTING_THEME,
 	SETTING_WORD_COUNT_VISIBILITY,
 	USER_ID_INDEX,
+	UPDATED_AT_INDEX,
 	type PageRecord,
 	type SettingRecord
 } from './records';
@@ -157,10 +159,9 @@ function createMemoryBackend(): StorageBackend {
 			);
 		},
 		async loadSession(userId: string) {
-			const userPages = [...pages.values()]
-				.filter((page) => page.userId === userId)
-				.sort(comparePages)
-				.map((page) => toEditorPage(page));
+			const userPages = sortPagesByRecency(
+				[...pages.values()].filter((page) => page.userId === userId).map((page) => toEditorPage(page))
+			);
 
 			if (userPages.length === 0) {
 				return null;
@@ -214,10 +215,10 @@ async function createIndexedDbBackend(): Promise<StorageBackend> {
 			const tx = db.transaction([PAGES_STORE_NAME, SETTINGS_STORE_NAME], 'readonly');
 			const pagesStore = tx.objectStore(PAGES_STORE_NAME);
 			const settingsStore = tx.objectStore(SETTINGS_STORE_NAME);
-			const userIndex = pagesStore.index(USER_ID_INDEX);
+			const updatedAtIndex = pagesStore.index(UPDATED_AT_INDEX);
 
 			const [pages, activePageSetting] = await Promise.all([
-				requestToPromise<PageRecord[]>(userIndex.getAll(IDBKeyRange.only(userId))),
+				readPagesByUpdatedAtDesc(updatedAtIndex, userId),
 				requestToPromise<SettingRecord | undefined>(settingsStore.get([userId, SETTING_ACTIVE_PAGE_ID]))
 			]);
 			await transactionToPromise(tx);
@@ -228,7 +229,7 @@ async function createIndexedDbBackend(): Promise<StorageBackend> {
 
 			return normalizeSession(
 				{
-					pages: pages.sort(comparePages).map((page) => toEditorPage(page)),
+					pages: pages.map((page) => toEditorPage(page)),
 					activePageId:
 						typeof activePageSetting?.value === 'string' ? activePageSetting.value : pages[0]!.id
 				},
@@ -269,7 +270,8 @@ async function openDatabase(): Promise<IDBDatabase> {
 				const pagesStore = db.createObjectStore(PAGES_STORE_NAME, {
 					keyPath: ['userId', 'id']
 				});
-				pagesStore.createIndex(USER_ID_INDEX, 'userId', { unique: false });
+			pagesStore.createIndex(USER_ID_INDEX, 'userId', { unique: false });
+				pagesStore.createIndex(UPDATED_AT_INDEX, ['userId', 'updatedAt'], { unique: false });
 			}
 
 			if (!db.objectStoreNames.contains(SETTINGS_STORE_NAME)) {
@@ -339,12 +341,25 @@ function createSettingRecord(userId: string, key: string, value: unknown): Setti
 	};
 }
 
-function comparePages(left: PageRecord, right: PageRecord) {
-	if (left.createdAt !== right.createdAt) {
-		return left.createdAt.localeCompare(right.createdAt);
-	}
+function readPagesByUpdatedAtDesc(index: IDBIndex, userId: string): Promise<PageRecord[]> {
+	return new Promise((resolve, reject) => {
+		const pages: PageRecord[] = [];
+		const range = IDBKeyRange.bound([userId, ''], [userId, '\uffff']);
+		const request = index.openCursor(range, 'prev');
 
-	return left.id.localeCompare(right.id);
+		request.onsuccess = () => {
+			const cursor = request.result;
+			if (!cursor) {
+				resolve(pages);
+				return;
+			}
+
+			pages.push(cursor.value as PageRecord);
+			cursor.continue();
+		};
+
+		request.onerror = () => reject(request.error);
+	});
 }
 
 function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {

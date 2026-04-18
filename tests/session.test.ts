@@ -6,6 +6,8 @@ import {
 	createSession,
 	derivePageTitle,
 	ensureValidActivePage,
+	getRemoteActivePageUpdateTarget,
+	hasVisibleEphemeralActivePage,
 	markPageDirty,
 	normalizeSession,
 	updatePageState
@@ -29,23 +31,35 @@ test('normalizeSession migrates the legacy single-document state into one page',
 	assert.equal(session.activePageId, session.pages[0]?.id);
 });
 
-test('normalizeSession repairs incomplete page data and keeps the first page active', () => {
+test('normalizeSession repairs incomplete page data and keeps the most recently updated page active', () => {
 	const session = normalizeSession({
-		pages: [{ content: 'alpha\r\nbeta' }, { id: 'p-2', title: 'Saved', content: '' }],
+		pages: [
+			{
+				id: 'p-1',
+				content: 'alpha\r\nbeta',
+				updatedAt: '2026-04-14T00:00:00.000Z'
+			},
+			{
+				id: 'p-2',
+				title: 'Saved',
+				content: '',
+				updatedAt: '2026-04-15T00:00:00.000Z'
+			}
+		],
 		activePageId: 'missing'
 	});
 
 	assert.ok(session);
 	assert.equal(session.pages.length, 2);
-	const repairedPage = session.pages.find((page) => page.content === 'alpha\nbeta');
-	const savedPage = session.pages.find((page) => page.id === 'p-2');
+	const savedPage = session.pages[0];
+	const repairedPage = session.pages[1];
 	assert.ok(repairedPage);
 	assert.ok(savedPage);
-	assert.equal(repairedPage.content, 'alpha\nbeta');
-	assert.equal(repairedPage.title, 'alpha');
-	assert.equal(savedPage.title, 'Saved');
-	assert.equal(repairedPage.userId, ANONYMOUS_USERID);
-	assert.ok(session.pages.some((page) => page.id === session.activePageId && page.deletedAt === null));
+	assert.equal(savedPage?.title, 'Saved');
+	assert.equal(repairedPage?.content, 'alpha\nbeta');
+	assert.equal(repairedPage?.title, 'alpha');
+	assert.equal(repairedPage?.userId, ANONYMOUS_USERID);
+	assert.equal(session.activePageId, 'p-2');
 });
 
 test('createSession seeds a locally-owned dirty ephemeral page by default', () => {
@@ -60,6 +74,72 @@ test('createSession seeds a locally-owned dirty ephemeral page by default', () =
 	assert.equal(page.lastKnownRemoteDeletedAt, null);
 	assert.equal(page.syncStatus, 'dirty');
 	assert.equal(page.isEphemeral, true);
+});
+
+test('hasVisibleEphemeralActivePage detects a visible placeholder as active', () => {
+	const session = createSession();
+	assert.equal(hasVisibleEphemeralActivePage(session), true);
+
+	const materialized = updatePageState(session.pages[0]!, {
+		text: 'real note',
+		selectionStart: 0,
+		selectionEnd: 0
+	});
+	assert.equal(
+		hasVisibleEphemeralActivePage({
+			...session,
+			pages: [materialized]
+		}),
+		false
+	);
+});
+
+test('getRemoteActivePageUpdateTarget returns the newly selected real page', () => {
+	const previous = ensureValidActivePage({
+		activePageId: 'page-a',
+		pages: [
+			{
+				...createSession().pages[0]!,
+				id: 'page-a',
+				title: 'A',
+				content: 'alpha',
+				text: 'alpha',
+				isEphemeral: false
+			},
+			{
+				...createSession().pages[0]!,
+				id: 'page-b',
+				title: 'B',
+				content: 'beta',
+				text: 'beta',
+				isEphemeral: false
+			}
+		]
+	});
+
+	const next = {
+		...previous,
+		activePageId: 'page-b'
+	};
+
+	assert.equal(getRemoteActivePageUpdateTarget(previous, next), 'page-b');
+});
+
+test('getRemoteActivePageUpdateTarget returns the previous active page when add page promotes it', () => {
+	const previous = createSession('user-a');
+	const promoted = updatePageState(previous.pages[0]!, {
+		text: 'real note',
+		selectionStart: 0,
+		selectionEnd: 0
+	});
+	const nextEphemeral = createSession('user-a').pages[0]!;
+
+	const next = ensureValidActivePage({
+		pages: [promoted, { ...nextEphemeral, id: 'page-b', userId: 'user-a' }],
+		activePageId: 'page-b'
+	});
+
+	assert.equal(getRemoteActivePageUpdateTarget(previous, next), promoted.id);
 });
 
 test('updatePageState refreshes content, derives titles, and materializes the page', () => {
@@ -165,7 +245,7 @@ test('derivePageTitle falls back to Untitled for blank content', () => {
 	assert.equal(derivePageTitle('   \n  '), 'Untitled');
 });
 
-test('ensureValidActivePage falls back to the first page when the active page is missing', () => {
+test('ensureValidActivePage falls back to the most recently updated visible page when the active page is missing', () => {
 	const repaired = ensureValidActivePage({
 		activePageId: 'missing',
 		pages: [
@@ -185,9 +265,27 @@ test('ensureValidActivePage falls back to the first page when the active page is
 				lastKnownRemoteDeletedAt: null,
 				syncStatus: 'dirty',
 				isEphemeral: false
+			},
+			{
+				id: 'page-b',
+				userId: ANONYMOUS_USERID,
+				title: 'B',
+				content: 'beta',
+				text: 'beta',
+				selectionStart: 0,
+				selectionEnd: 0,
+				createdAt: '2026-04-15T00:00:00.000Z',
+				updatedAt: '2026-04-15T00:00:00.000Z',
+				deletedAt: null,
+				lastSyncedAt: null,
+				lastKnownRemoteUpdatedAt: null,
+				lastKnownRemoteDeletedAt: null,
+				syncStatus: 'dirty',
+				isEphemeral: false
 			}
 		]
 	});
 
-	assert.equal(repaired.activePageId, 'page-a');
+	assert.equal(repaired.pages[0]?.id, 'page-b');
+	assert.equal(repaired.activePageId, 'page-b');
 });

@@ -9,10 +9,12 @@
 	import Icon from '$lib/Icon.svelte';
 	import Modal from '$lib/Modal.svelte';
 	import OtpInput from '$lib/OtpInput.svelte';
+	import { createActivePageController } from '$lib/editor/active-page-controller';
 	import {
 		applyEditorStateUpdate,
 		applyHydratedSession,
-		applySessionUpdate
+		applySessionUpdate,
+		type PageEditorUpdate
 	} from '$lib/editor/core/app-state';
 	import { createSyncController } from '$lib/editor/sync-controller';
 	import {
@@ -31,7 +33,6 @@
 		type EditorPreferences,
 		type ThemeMode
 	} from '$lib/editor/core/preferences';
-	import { type EditorState } from '$lib/editor/basic/history';
 	import {
 		findSavedAuthSessionByEmail,
 		removeSavedAuthSession,
@@ -39,7 +40,7 @@
 	} from '$lib/auth/session-vault';
 	import { EditorStorage } from '$lib/editor/persistence/storage';
 	import { ANONYMOUS_USERID } from '$lib/editor/persistence/records';
-	import { fetchRemoteActivePageId, syncUserPages } from '$lib/editor/sync';
+	import { fetchRemoteActivePageId, pushRemoteActivePageId, syncUserPages } from '$lib/editor/sync';
 	import { clearActiveSupabaseSession, getSupabaseClient } from '$lib/supabaseClient';
 	import {
 		clonePageForUser,
@@ -47,6 +48,9 @@
 		createSession,
 		markPageDeleted,
 		ensureValidActivePage,
+		getRemoteActivePageUpdateTarget,
+		hasVisibleEphemeralActivePage,
+		sortPagesByRecency,
 		materializePage,
 		type EditorPage,
 		type EditorSession,
@@ -120,9 +124,20 @@ let session: EditorSession = { pages: [], activePageId: '' };
 	const CHROME_HIDE_DELAY = 1400;
 	const APP_UPDATED_NOTICE_KEY = 'blank-app-updated-notice';
 	const EDIT_SYNC_DEBOUNCE_MS = 3000;
+	const ACTIVE_PAGE_PUSH_DEBOUNCE_MS = 300;
 	const syncController = createSyncController({
 		delayMs: EDIT_SYNC_DEBOUNCE_MS,
 		runSync: executeSync
+	});
+	const activePageController = createActivePageController({
+		delayMs: ACTIVE_PAGE_PUSH_DEBOUNCE_MS,
+		runPush: async (pageId: string) => {
+			if (!supabase || !authUser || !loaded) {
+				return;
+			}
+
+			await pushRemoteActivePageId(supabase, authUser.id, pageId);
+		}
 	});
 
 	$: activePage = getActivePage(session);
@@ -185,11 +200,55 @@ let session: EditorSession = { pages: [], activePageId: '' };
 		return currentSession.pages[0] ?? createPage('', { userId: getScopedUserId() });
 	}
 
+	function logSessionDebug(event: string, details: Record<string, unknown> = {}) {
+		console.log('[debug][page]', event, {
+			activePageId: session.activePageId,
+			pageIds: session.pages.map((page) => page.id),
+			pages: session.pages.map((page) => ({
+				id: page.id,
+				title: page.title,
+				isEphemeral: page.isEphemeral,
+				deletedAt: page.deletedAt,
+				contentPreview: page.content.slice(0, 40)
+			})),
+			...details
+		});
+	}
+
+	function summarizeSession(nextSession: EditorSession) {
+		return {
+			activePageId: nextSession.activePageId,
+			pageIds: nextSession.pages.map((page) => page.id),
+			pages: nextSession.pages.map((page) => ({
+				id: page.id,
+				title: page.title,
+				isEphemeral: page.isEphemeral,
+				deletedAt: page.deletedAt,
+				contentPreview: page.content.slice(0, 20)
+			}))
+		};
+	}
+
+	function queueRemoteActivePageUpdate(previousSession: EditorSession, nextSession: EditorSession) {
+		const pageId = getRemoteActivePageUpdateTarget(previousSession, nextSession);
+		if (!pageId || !authUser || !supabase || !loaded) {
+			return;
+		}
+
+		activePageController.schedule(pageId);
+	}
+
 	function persistSession(nextSession: EditorSession) {
 		const normalizedSession = ensureValidActivePage(nextSession);
 		const previousSession = session;
+		logSessionDebug('persistSession:start', {
+			nextActivePageId: normalizedSession.activePageId,
+			nextPageIds: normalizedSession.pages.map((page) => page.id)
+		});
 		const transition = applySessionUpdate({ session, loaded }, normalizedSession);
 		session = transition.state.session;
+		logSessionDebug('persistSession:applied');
+		queueRemoteActivePageUpdate(previousSession, transition.state.session);
 		if (transition.persistedSession) {
 			void persistWorkspaceState(previousSession, transition.persistedSession);
 		}
@@ -199,19 +258,41 @@ let session: EditorSession = { pages: [], activePageId: '' };
 		nextSession: EditorSession,
 		options: {
 			persist?: boolean;
+			source?: string;
+			details?: Record<string, unknown>;
 		} = {}
 	) {
 		const previousSession = session;
+		console.log('[debug][page] replaceLocalSession', {
+			source: options.source ?? 'unknown',
+			persist: options.persist ?? false,
+			current: summarizeSession(session),
+			next: summarizeSession(nextSession),
+			...options.details
+		});
 		session = ensureValidActivePage(nextSession);
+		queueRemoteActivePageUpdate(previousSession, session);
 		if (loaded && options.persist) {
 			void persistWorkspaceState(previousSession, session);
 		}
 	}
 
-	function updateActivePage(state: EditorState) {
+	function updateActivePage(update: PageEditorUpdate) {
+		if (!session.pages.some((page) => page.id === update.pageId)) {
+			logSessionDebug('updateActivePage:missing-page', {
+				updatePageId: update.pageId,
+				updateContentPreview: update.state.text.slice(0, 40)
+			});
+			return;
+		}
+
 		const previousSession = session;
-		const transition = applyEditorStateUpdate({ session, loaded }, state);
-		session = transition.state.session;
+		const transition = applyEditorStateUpdate({ session, loaded }, update);
+		session = {
+			...transition.state.session,
+			pages: sortPagesByRecency(transition.state.session.pages)
+		};
+		queueRemoteActivePageUpdate(previousSession, transition.state.session);
 		if (transition.persistedSession) {
 			const previousPage = previousSession.pages.find((page) => page.id === previousSession.activePageId);
 			const nextPage = transition.state.session.pages.find(
@@ -738,6 +819,7 @@ let session: EditorSession = { pages: [], activePageId: '' };
 		clearHideChromeTimeout();
 		clearEditorIdleFlush();
 		syncController.cancel();
+		activePageController.cancel();
 		stopResendCooldown();
 		clearAllToasts();
 		if (browser) {
@@ -757,12 +839,19 @@ async function loadPreferences(userId = getScopedUserId()) {
 
 async function hydrateInitialLocalState(nextUser: User | null) {
 	authUser = nextUser;
+	console.log('[debug][page] hydrateInitialLocalState:start', {
+		userId: nextUser?.id ?? null
+	});
 
 	if (!nextUser) {
 		const [anonymousSession, anonymousPreferences] = await Promise.all([
 			EditorStorage.loadUserState(ANONYMOUS_USERID),
 			loadPreferences(ANONYMOUS_USERID)
 		]);
+		console.log('[debug][page] hydrateInitialLocalState:anonymous-loaded', {
+			hasSession: !!anonymousSession,
+			pageIds: anonymousSession?.pages.map((page) => page.id) ?? []
+		});
 		const hydratedState = applyHydratedSession(anonymousSession ?? createSession(ANONYMOUS_USERID));
 		session = hydratedState.session;
 		loaded = hydratedState.loaded;
@@ -775,6 +864,12 @@ async function hydrateInitialLocalState(nextUser: User | null) {
 		EditorStorage.loadUserState(nextUser.id),
 		loadPreferences(nextUser.id)
 	]);
+	console.log('[debug][page] hydrateInitialLocalState:user-loaded', {
+		userId: nextUser.id,
+		hasSession: !!userLocal,
+		pageIds: userLocal?.pages.map((page) => page.id) ?? [],
+		activePageId: userLocal?.activePageId ?? null
+	});
 	const hydratedState = applyHydratedSession(userLocal ?? createSession(nextUser.id));
 	session = hydratedState.session;
 	loaded = hydratedState.loaded;
@@ -859,6 +954,10 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 	async function syncAuthState(nextUser: User | null) {
 		const requestId = ++currentAuthRequestId;
 		authUser = nextUser;
+		console.log('[debug][page] syncAuthState:start', {
+			requestId,
+			userId: nextUser?.id ?? null
+		});
 
 		if (!nextUser) {
 			pendingAnonymousImportSession = null;
@@ -871,7 +970,9 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 			]);
 			preferences = anonymousPreferences;
 			applyTheme(preferences.themeMode);
-			replaceLocalSession(anonymousSession);
+			replaceLocalSession(anonymousSession, {
+				source: 'syncAuthState:anonymous-session'
+			});
 			return;
 		}
 
@@ -885,6 +986,12 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 				EditorStorage.hasPromptedForAnonymousImport(nextUser.id),
 				loadPreferences(nextUser.id)
 			]);
+			console.log('[debug][page] syncAuthState:loaded-local', {
+				requestId,
+				userId: nextUser.id,
+				userLocalPageIds: userLocal?.pages.map((page) => page.id) ?? [],
+				userLocalActivePageId: userLocal?.activePageId ?? null
+			});
 			const hasAnonymousData = anonymousSession.pages.some(
 				(page) => page.deletedAt === null && (page.content.trim().length > 0 || page.title !== 'Untitled')
 			);
@@ -898,10 +1005,20 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 
 			const baseSession = userLocal ?? createSession(nextUser.id);
 			let syncedSession = baseSession;
+			console.log('[debug][page] syncAuthState:baseSession', {
+				requestId,
+				activePageId: baseSession.activePageId,
+				pageIds: baseSession.pages.map((page) => page.id)
+			});
 			if (supabase) {
 				appSyncStatus = isBrowserOnline() ? 'syncing' : 'offline';
 				try {
 					syncedSession = (await syncUserPages(supabase, nextUser.id, baseSession)).session;
+					console.log('[debug][page] syncAuthState:syncedSession', {
+						requestId,
+						activePageId: syncedSession.activePageId,
+						pageIds: syncedSession.pages.map((page) => page.id)
+					});
 					appSyncStatus = 'synced';
 				} catch (error) {
 					appSyncStatus = isBrowserOnline() ? 'error' : 'offline';
@@ -910,7 +1027,13 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 			}
 			const remoteActivePageId =
 				supabase ? await fetchRemoteActivePageId(supabase, nextUser.id) : null;
+			console.log('[debug][page] syncAuthState:remoteActivePage', {
+				requestId,
+				remoteActivePageId
+			});
+			const shouldPreserveLocalEphemeralPage = hasVisibleEphemeralActivePage(syncedSession);
 			const nextSession =
+				!shouldPreserveLocalEphemeralPage &&
 				remoteActivePageId &&
 				syncedSession.pages.some((page) => page.id === remoteActivePageId && page.deletedAt === null)
 					? {
@@ -918,8 +1041,16 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 							activePageId: remoteActivePageId
 						}
 					: syncedSession;
+			console.log('[debug][page] syncAuthState:nextSession', {
+				requestId,
+				activePageId: nextSession.activePageId,
+				pageIds: nextSession.pages.map((page) => page.id)
+			});
 			if (!areEditorSessionsEquivalent(nextSession, session)) {
-				replaceLocalSession(mergeEditorSelections(nextSession, session));
+				replaceLocalSession(mergeEditorSelections(nextSession, session), {
+					source: 'syncAuthState:nextSession',
+					details: { requestId }
+				});
 			}
 
 			if (hasAnonymousData && !alreadyPrompted) {
@@ -1073,6 +1204,12 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 		const page = authUser
 			? await EditorStorage.loadUserPage(authUser.id, noteId)
 			: await EditorStorage.loadAnonymousPage(noteId);
+		console.log('[debug][page] refreshPageFromIndexedDb', {
+			eventType,
+			noteId,
+			found: !!page,
+			pagePreview: page ? { id: page.id, title: page.title, contentPreview: page.content.slice(0, 20) } : null
+		});
 		if (!page) {
 			if (eventType !== 'deleted-page') {
 				return;
@@ -1087,7 +1224,9 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 			}
 
 			replaceLocalSession(nextSession, {
-				persist: false
+				persist: false,
+				source: 'refreshPageFromIndexedDb:deleted-page',
+				details: { eventType, noteId }
 			});
 			return;
 		}
@@ -1108,7 +1247,9 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 		}
 
 		replaceLocalSession(mergeEditorSelections(nextSession, session), {
-			persist: false
+			persist: false,
+			source: 'refreshPageFromIndexedDb:page-load',
+			details: { eventType, noteId }
 		});
 	}
 
@@ -1230,15 +1371,27 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 		authMessage = '';
 
 		try {
+			console.log('[debug][page] executeSync:start', summarizeSession(syncSourceSession));
 			const result = await syncUserPages(supabase, authUser.id, syncSourceSession);
+			console.log('[debug][page] executeSync:result', {
+				pushedCount: result.pushedCount,
+				pulledCount: result.pulledCount,
+				conflictCount: result.conflictCount,
+				session: summarizeSession(result.session)
+			});
 
 			if (!areEditorSessionsEquivalent(session, syncSourceSession)) {
+				console.log('[debug][page] executeSync:queueFollowUp', {
+					current: summarizeSession(session),
+					source: summarizeSession(syncSourceSession)
+				});
 				syncController.queueFollowUp(options);
 				return;
 			}
 
 			replaceLocalSession(mergeEditorSelections(result.session, session), {
-				persist: true
+				persist: true,
+				source: 'executeSync:result'
 			});
 
 			if (result.conflictCount > 0) {
@@ -1591,6 +1744,7 @@ async function savePreferences(nextPreferences: EditorPreferences) {
 		{#if loaded}
 			{#key activePage.id}
 				<Editor
+					pageId={activePage.id}
 					initialState={{
 						text: activePage.content,
 						selectionStart: activePage.selectionStart,

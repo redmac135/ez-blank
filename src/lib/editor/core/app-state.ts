@@ -12,6 +12,11 @@ export interface PageAppTransition {
 	persistedSession: EditorSession | null;
 }
 
+export interface PageEditorUpdate {
+	pageId: string;
+	state: EditorState;
+}
+
 export function applyHydratedSession(session: EditorSession): PageAppState {
 	return {
 		session,
@@ -34,12 +39,26 @@ export function applySessionUpdate(
 
 export function applyEditorStateUpdate(
 	state: PageAppState,
-	editorState: EditorState
+	editorUpdate: PageEditorUpdate
 ): PageAppTransition {
+	if (!state.session.pages.some((page) => page.id === editorUpdate.pageId)) {
+		console.log('[debug][app-state] ignore missing page update', {
+			pageId: editorUpdate.pageId,
+			activePageId: state.session.activePageId,
+			pageIds: state.session.pages.map((page) => page.id),
+			contentPreview: editorUpdate.state.text.slice(0, 40)
+		});
+
+		return {
+			state,
+			persistedSession: null
+		};
+	}
+
 	return applySessionUpdate(state, {
 		...state.session,
 		pages: state.session.pages.map((page) =>
-			page.id === state.session.activePageId ? updatePageState(page, editorState) : page
+			page.id === editorUpdate.pageId ? updatePageState(page, editorUpdate.state) : page
 		)
 	});
 }
